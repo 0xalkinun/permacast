@@ -34,6 +34,7 @@ from ref import Model
 ROOT = Path(__file__).parent
 STEPS = 10000  # steps timed on the CPU
 STREAMS = 1024  # streams run side by side on the GPU
+BUILDS = 6  # chips built at once, each of which can take a few gigabytes of memory
 
 
 def run(*command, cwd=None):
@@ -127,7 +128,7 @@ if __name__ == '__main__':
     parser.add_argument('--valid', type=Path, help='held-out text to score the models on')
     args = parser.parse_args()
     models = [measure_model(p, args.valid) for p in args.models]  # one at a time, since they are timed
-    with ProcessPoolExecutor() as pool:
+    with ProcessPoolExecutor(BUILDS) as pool:
         chips = list(pool.map(measure_chip, *zip(*[(p, lanes) for p in args.models for lanes in args.lanes])))
     (ROOT / 'BENCH.md').write_text(
         '# Bench\n\n'
