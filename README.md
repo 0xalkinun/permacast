@@ -73,19 +73,20 @@ the bytes of any file, and compare with the reference:
     python ../ref.py ../model.pc < input | cmp - output
 
 To simulate the whole chip writing 300 bytes on its own, through its serial
-port, in the same folder (the first line of story is the seed it took):
+port, in the same folder:
 
     verilator --binary -Wno-WIDTHEXPAND --top chip_tb ../chip_tb.v ../chip.v \
         permacast.v --Mdir obj_chip -o sim
     ./obj_chip/sim +seed=1 +loop=300 +out=story
 
+The file story holds the seed the chip took, then the bytes it wrote.
 [chip.v](chip.v) describes the serial protocol.
 
 ## Run on a board
 
 [boards](boards) puts the chip on a Sipeed Tang Mega 138K Dock, though it has
-not been tried on a board yet. Once the board is loaded and reset, this lets
-the chip write, and checks every byte against the reference:
+not been tried on a board yet. Once the board is loaded, this lets the chip
+write, and checks every byte against the reference:
 
     python host.py /dev/ttyUSB1 model.pc
 
