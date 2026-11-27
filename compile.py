@@ -93,40 +93,40 @@ def compile(m, lanes=1):
     # one tick each, then stores one word of results.
     ops = []
 
-    def add(comment, y, rows, cols, read='', result='0', last=None):
+    def operation(comment, y, rows, cols, read='', result='0', last=None):
         ops.append((comment, y, rows, cols, last or cols, read, result))
 
     for h in m.state:
-        add(f'clear {h}', h, words(size[h]), 1)
+        operation(f'clear {h}', h, words(size[h]), 1)
     first = len(ops)
     for y, (n, b) in m.rand.items():
-        add(f'rand {y} {n} {b}', y, words(n), L, '', f'j1 == p ? gn[31:{32 - b}] : acc', n - (words(n) - 1) * L)
+        operation(f'rand {y} {n} {b}', y, words(n), L, '', f'j1 == p ? gn[31:{32 - b}] : acc', n - (words(n) - 1) * L)
     draws = ' || '.join(f'op == {i}' for i in range(first, len(ops))) or '0'
     for y, op, (a, *rest) in m.code:
         comment, rows = ' '.join(map(str, (op, y, a, *rest))), words(size[y])
         if op == 'row':
-            add(comment, y, rows, 1, f"base = x[{X - 1}:0] * {K}'d{rows}; ", lane(a, 'p'))
+            operation(comment, y, rows, 1, f"base = x[{X - 1}:0] * {K}'d{rows}; ", lane(a, 'p'))
         elif op == 'matmul':
-            add(comment, y, rows, size[rest[0]], f'a = j >> {lg}; t = {lane(rest[0], J1)}; ', f'acc + {lane(a, "p")} * t')
+            operation(comment, y, rows, size[rest[0]], f'a = j >> {lg}; t = {lane(rest[0], J1)}; ', f'acc + {lane(a, "p")} * t')
         elif op == 'take':  # in each row, read the word of indices, then the table once per lane
             b, n = rest[0], size[y]
             read = f'ta = q_{b}[{JP}*{width[b]} +: {min(width[b], index(size[a]))}]; '
-            add(comment, y, rows, L + 1, read, f'j1 == p + 1 ? q_{a} : acc', n - (rows - 1) * L + 1)
+            operation(comment, y, rows, L + 1, read, f'j1 == p + 1 ? q_{a} : acc', n - (rows - 1) * L + 1)
         elif op == 'argmax':  # acc holds the index of the largest element so far
             read, result = f'a = j >> {lg}; t = {lane(a, J1)}; ', f'j1 == 0 || t > best ? j1[{index(size[a]) - 1}:0] : acc'
-            add(comment, y, 1, size[a], read, result)
+            operation(comment, y, 1, size[a], read, result)
         elif op == 'shr':
-            add(comment, y, rows, 1, '', f'{lane(a, "p")} >>> {rest[0]}')
+            operation(comment, y, rows, 1, '', f'{lane(a, "p")} >>> {rest[0]}')
         elif op == 'clamp':  # limits outside the bounds of a never apply
             lo, hi = (f"{'-' if v < 0 else ''}{W}'sd{abs(v)}"
                       for v in (max(rest[0], m.range[a][0]), min(rest[1], m.range[a][1])))
-            add(comment, y, rows, 1, '', f'{lane(a, "p")} < {lo} ? {lo} : {lane(a, "p")} > {hi} ? {hi} : {lane(a, "p")}')
+            operation(comment, y, rows, 1, '', f'{lane(a, "p")} < {lo} ? {lo} : {lane(a, "p")} > {hi} ? {hi} : {lane(a, "p")}')
         else:
-            add(comment, y, rows, 1, '', f'{lane(a, "p")} {SIGN[op]} {lane(rest[0], "p")}')
+            operation(comment, y, rows, 1, '', f'{lane(a, "p")} {SIGN[op]} {lane(rest[0], "p")}')
     emit = len(ops)
-    add(f'out {m.output}', None, 1, size[m.output], f'a = j >> {lg}; t = {lane(m.output, J1)}; ')
+    operation(f'out {m.output}', None, 1, size[m.output], f'a = j >> {lg}; t = {lane(m.output, J1)}; ')
     for h, a in m.next.items():
-        add(f'next {h} {a}', h, words(size[h]), 1, '', lane(a, 'p'))
+        operation(f'next {h} {a}', h, words(size[h]), 1, '', lane(a, 'p'))
     N = index(max([o[2] for o in ops] + [o[3] for o in ops] + list(depth.values()) + [L + 1]))
 
     memories, reads, wires, packs, cases, results = [], [], [], [], [], []
