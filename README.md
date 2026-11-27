@@ -21,6 +21,7 @@ short program of integer operations.
 | [SPEC.md](SPEC.md) | Defines the model format |
 | [ref.py](ref.py) | The reference: runs a model and defines what is correct |
 | [cpu.c](cpu.c) | The CPU baseline: runs a model fast on one core |
+| [gpu.py](gpu.py) | The GPU baseline: runs copies of a model side by side on a GPU |
 | [stories.py](stories.py) | Fetches and prepares the text for the stories model |
 | [train.py](train.py) | Trains a model on a text file and exports it |
 | [compile.py](compile.py) | Compiles a model to Verilog |
@@ -30,11 +31,11 @@ short program of integer operations.
 | [boards](boards) | The chip on FPGA boards |
 | [host.py](host.py) | Lets a chip on a serial port write, and checks every byte |
 | [test.py](test.py) | Tests everything against the reference |
-| [bench.py](bench.py) | Measures the chips against the CPU, into [BENCH.md](BENCH.md) |
+| [bench.py](bench.py) | Measures the chips against the baselines, into [BENCH.md](BENCH.md) |
 
-The reference needs Python and NumPy, training needs PyTorch, the CPU
-baseline and the tests need a C compiler, and simulation needs
-[Verilator](https://verilator.org). The bench also needs
+The reference needs Python and NumPy, training and the GPU baseline need
+PyTorch, the CPU baseline and the tests need a C compiler, and simulation
+needs [Verilator](https://verilator.org). The bench also needs
 [Yosys](https://yosyshq.net/yosys) and
 [nextpnr](https://github.com/YosysHQ/nextpnr) for the ECP5.
 
@@ -92,7 +93,7 @@ the chip write, and checks every byte against the reference:
 
 For each number of lanes this checks the compiled circuit against the
 reference, counts its clock ticks per step, and builds it for a Lattice ECP5
-to get its size and fastest clock. It also times the CPU baseline on the same
+to get its size and fastest clock. It also times both baselines on the same
 model.
 
 ## Principles

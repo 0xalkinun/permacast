@@ -1,14 +1,14 @@
-"""Measure the chips the compiler makes, against the CPU baseline.
+"""Measure the chips the compiler makes, against the CPU and GPU baselines.
 
 python bench.py model.pc ... [--lanes 1 8 64]    writes BENCH.md
 
 Each model is compiled once for each number of lanes. A circuit is measured
 only if it matches the reference. Its clock ticks per step come from
 simulation, and its size and fastest clock from building it for a Lattice
-ECP5 with open tools, which anyone can repeat. The CPU baseline must match the
+ECP5 with open tools, which anyone can repeat. The baselines must match the
 reference too.
 
-It needs a C compiler, Verilator, Yosys and nextpnr-ecp5.
+It needs a C compiler, PyTorch with a GPU, Verilator, Yosys and nextpnr-ecp5.
 """
 import argparse
 import hashlib
@@ -21,11 +21,15 @@ import textwrap
 from math import prod
 from pathlib import Path
 
+import torch
+
+import gpu
 from compile import bits
 from ref import Model
 
 ROOT = Path(__file__).parent
 STEPS = 10000  # steps timed on the CPU
+STREAMS = 1024  # streams run side by side on the GPU
 
 
 def run(*command, cwd=None):
@@ -54,7 +58,7 @@ def inputs(model, n):
 
 
 def measure_model(path):
-    """The memory of a model, and the steps per second of the CPU baseline."""
+    """The memory of a model, and the steps per second of the baselines."""
     text = path.read_text()
     model = Model(text)
     data = inputs(model, STEPS)
@@ -71,8 +75,9 @@ def measure_model(path):
         return sum(prod(model.shape[n]) * bits(*model.range[n])
                    for n in model.shape if n != model.input and (n in model.const) == constant)
 
+    alone, together = gpu.speed(text, 2000), gpu.speed(text, 200, STREAMS) * STREAMS
     return [path.stem, hashlib.sha256(text.encode()).hexdigest()[:12], f'{stored(True):,}', f'{stored(False):,}',
-            f'{max(speeds):,}']
+            *(f'{round(n):,}' for n in (max(speeds), alone, together))]
 
 
 def measure_chip(path, lanes):
@@ -119,7 +124,10 @@ if __name__ == '__main__':
                     'other vector.', '  ')
         + paragraph(f"- **CPU steps per second** are for `cpu.c` built with GCC {version('cc', '--version')}, "
                     f'on one core of the {processor()}, the best of three runs of {STEPS:,} steps.', '  ')
-        + '\n' + table(['Model', 'SHA-256', 'ROM, bits', 'RAM, bits', 'CPU steps per second'], models)
+        + paragraph(f'- **GPU steps per second** are for `gpu.py` with PyTorch {torch.__version__.split("+")[0]} on '
+                    f'an {torch.cuda.get_device_name()}: one stream, and {STREAMS:,} streams together.', '  ')
+        + '\n' + table(['Model', 'SHA-256', 'ROM, bits', 'RAM, bits', 'CPU steps per second', 'GPU steps per second',
+                        f'GPU, {STREAMS:,} streams'], models)
         + '\n## Chips\n\n'
         + paragraph(f"- **Ticks per step** are counted in simulation with Verilator "
                     f"{version('verilator', '--version')}.", '  ')
