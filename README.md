@@ -1,7 +1,7 @@
 # Permacast
 
-Permacast is an open-source compiler that turns a trained language model into a
-chip that is that model. The weights are built into the chip as read-only
+Permacast is an open-source compiler that turns a trained language model into
+a chip that is that model. The weights are built into the chip as read-only
 memory, so there is no external memory and nothing to load. Each model is
 trained to an exact integer specification, and the hardware must match the
 software reference bit for bit.
@@ -15,8 +15,8 @@ model, including the ones we lose.
 
 0. **Spec and reference.** A small model trained on text exports to the
    [model format](SPEC.md), and the reference reproduces the trainer's outputs
-   exactly. *In progress: the format and the reference exist, the trainer does
-   not.*
+   exactly. *Done: a gated recurrent model of 720,896 ternary weights reaches
+   1.13 bits per byte on held-out TinyStories.*
 1. **Simulation.** The compiler emits Verilog whose simulated output is
    identical to the reference.
 2. **FPGA.** A low-cost board runs the model, and we publish speed and energy
@@ -32,6 +32,17 @@ model, including the ones we lose.
   and hardware.
 - [ref.py](ref.py): the reference interpreter. It needs Python and NumPy.
 - [test.py](test.py): tests for the reference. Run `python test.py`.
+- [train.py](train.py): trains a model on a text file, exports it, and checks
+  that the reference reproduces the trainer's outputs. It needs PyTorch.
+
+## Training
+
+The first model learns to continue children's stories, one byte at a time,
+from the two text files of
+[TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories)
+(`TinyStoriesV2-GPT4-train.txt` and `TinyStoriesV2-GPT4-valid.txt`):
+
+    python train.py train.txt valid.txt model.pc
 
 ## Principles
 

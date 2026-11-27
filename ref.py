@@ -39,7 +39,7 @@ class Model:
         check(next(lines, None) == ['permacast', 0], 'missing header "permacast 0"')
         self.const = {}  # name -> array
         self.state = {}  # name -> array, zero before the first step
-        self.code = []   # (name, function, arguments) in file order
+        self.code = []   # (name, operation, arguments) in file order
         self.next = {}   # state -> the value it takes after each step
         self.shape = {}  # name -> shape, () for the input
         self.range = {}  # name -> (lo, hi), bounds that hold on every step
@@ -89,7 +89,7 @@ class Model:
             c = self.const[name] = np.array(rows, np.int64).reshape(args)
             return args, (int(c.min()), int(c.max()))
         check(op in STEP, 'unknown operation')
-        self.code.append((name, STEP[op], args))
+        self.code.append((name, op, args))
         if op in ('row', 'matmul'):
             m, a = args
             check(m in self.const and len(shape[m]) == 2, 'needs a constant matrix')
@@ -125,8 +125,8 @@ class Model:
     def step(self, x):
         check(0 <= x <= self.range[self.input][1], 'input out of range')
         v = {**self.const, **self.state, self.input: x}
-        for name, f, args in self.code:
-            v[name] = f(v, *args)
+        for name, op, args in self.code:
+            v[name] = STEP[op](v, *args)
         self.state = {h: v[a] for h, a in self.next.items()}
         return v[self.output]
 

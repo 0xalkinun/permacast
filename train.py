@@ -1,0 +1,164 @@
+"""Train a Permacast model and export it.
+
+python train.py train.txt valid.txt model.pc
+
+A model is a program in the format of SPEC.md whose constants are learned.
+Training runs that program on floats that hold exact integers, so the exported
+file computes what was trained. The reference then confirms it, bit for bit.
+"""
+import argparse
+import math
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+from ref import Model
+
+SCALE = 256  # the loss reads the output as logits in units of 1/SCALE
+BATCH, TIME, RATE = 128, 256, 1e-2
+
+
+def ste(x, y):
+    """The value of y with the gradient of x."""
+    return x + (y - x).detach()
+
+
+STEP = {  # the operations of ref.py, on batches of vectors
+    'row': lambda v, m, x: v[m][v[x]],
+    'matmul': lambda v, m, a: v[a] @ v[m].T,
+    'add': lambda v, a, b: v[a] + v[b],
+    'sub': lambda v, a, b: v[a] - v[b],
+    'mul': lambda v, a, b: v[a] * v[b],
+    'shr': lambda v, a, k: ste(v[a] / 2**k, (v[a] / 2**k).floor()),
+    'clamp': lambda v, a, lo, hi: v[a].clamp(lo, hi),
+}
+
+
+def gru(n, m=64, k=4):
+    """A gated recurrent model with n units.
+
+    Returns its constants as {name: (scale, start)} and the program that uses
+    them. A constant is learned as a tensor within -1 to 1, beginning at
+    start, and is that tensor times scale, rounded.
+    """
+    def rand(*shape):
+        return torch.rand(shape) * 2 - 1
+    consts = {
+        'E': (127, rand(256, m)),
+        'Wz': (1, rand(n, m)), 'Uz': (1, rand(n, n)), 'bz': (127 << k, torch.full((n,), 0.5)),
+        'Wc': (1, rand(n, m)), 'Uc': (1, rand(n, n)), 'bc': (127 << k, torch.zeros(n)),
+        'Wy': (1, rand(256, n)),
+    }
+    program = f'''\
+in x 256
+state h {n} -127 127
+row e E x
+matmul zx Wz e       # z: how much of each unit to replace, 0 to 128
+matmul zh Uz h
+add z0 zx zh
+add z1 z0 bz
+shr z2 z1 {k}
+clamp z z2 0 128
+matmul cx Wc e       # c: the candidate state
+matmul ch Uc h
+add c0 cx ch
+add c1 c0 bc
+shr c2 c1 {k}
+clamp c c2 -127 127
+sub d c h            # h moves z/128 of the way to c
+mul u z d
+shr s u 7
+add h1 h s
+clamp h2 h1 -127 127
+next h h2
+matmul y Wy h2
+out y
+'''
+    return consts, program
+
+
+def export(consts, program):
+    """The text of a model, from integer constants and a program."""
+    lines = ['permacast 0']
+    for name, c in consts.items():
+        lines.append(' '.join(map(str, ('const', name, *c.shape))))
+        lines += (' '.join(map(str, row)) for row in c.reshape(-1, c.shape[-1]).tolist())
+    return '\n'.join(lines) + '\n' + program
+
+
+def run(model, consts, x):
+    """Run a model from zero state on a batch of input sequences.
+
+    x is (batch, time). Returns the outputs, (batch, time, size).
+    """
+    state = {h: x.new_zeros(len(x), len(s), dtype=torch.float) for h, s in model.state.items()}
+    outs = []
+    for t in range(x.shape[1]):
+        v = {**consts, **state, model.input: x[:, t]}
+        for name, op, args in model.code:
+            v[name] = STEP[op](v, *args)
+        state = {h: v[a] for h, a in model.next.items()}
+        outs.append(v[model.output])
+    return torch.stack(outs, 1)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('train')
+    parser.add_argument('valid')
+    parser.add_argument('out')
+    parser.add_argument('--steps', type=int, default=20000)
+    parser.add_argument('--units', type=int, default=512)
+    args = parser.parse_args()
+
+    torch.manual_seed(0)
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    train, valid = (torch.from_numpy(np.fromfile(f, np.uint8)) for f in (args.train, args.valid))
+    consts, program = gru(args.units)
+    scale = {name: s for name, (s, _) in consts.items()}
+    latent = {name: p.to(device).requires_grad_() for name, (_, p) in consts.items()}
+
+    def quantized():
+        return {name: ste(p * scale[name], (p * scale[name]).round()) for name, p in latent.items()}
+
+    def text():
+        return export({name: c.long().cpu().numpy() for name, c in quantized().items()}, program)
+
+    def loss(data):
+        """Bits per byte on random windows of the data."""
+        i = torch.randint(len(data) - TIME, (BATCH, 1)) + torch.arange(TIME + 1)
+        x = data[i].to(device).long()
+        y = run(model, quantized(), x[:, :-1])
+        return F.cross_entropy(y.flatten(0, 1) / SCALE, x[:, 1:].flatten()) / math.log(2)
+
+    model = Model(text())  # checks the program before any training
+    optimizer = torch.optim.Adam(latent.values(), RATE)
+    schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, RATE, total_steps=max(args.steps, 1))
+    for step in range(args.steps):
+        bits = loss(train)
+        optimizer.zero_grad()
+        bits.backward()
+        optimizer.step()
+        schedule.step()
+        with torch.no_grad():
+            for p in latent.values():
+                p.clamp_(-1, 1)
+            if step % 500 == 0 or step == args.steps - 1:
+                held = sum(loss(valid).item() for _ in range(10)) / 10
+                print(f'step {step}: train {bits.item():.3f}, valid {held:.3f} bits per byte', flush=True)
+
+    with open(args.out, 'w') as f:
+        f.write(text())
+
+    # The reference must agree with the trainer on every output.
+    reference = Model(open(args.out).read())
+    x = valid[:1000]
+    with torch.no_grad():
+        trained = run(model, quantized(), x[None].to(device).long())[0].long().cpu().numpy()
+    assert all((reference.step(int(b)) == y).all() for b, y in zip(x, trained)), 'reference differs'
+    print(f'{args.out}: the reference matches the trainer on {len(x)} steps')
+
+
+if __name__ == '__main__':
+    main()

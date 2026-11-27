@@ -21,8 +21,8 @@ give each value only the bits it needs.
 
 ## File
 
-The first line is `permacast 0`. Each line after it is an operation, written as
-its name followed by its arguments, separated by spaces. Blank lines are
+The first line is `permacast 0`. Each line after it is an operation, written
+as its name followed by its arguments, separated by spaces. Blank lines are
 ignored, and so is everything from a `#` to the end of its line.
 
 An integer is written in decimal, with a leading `-` if negative. Any other
