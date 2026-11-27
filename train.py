@@ -57,16 +57,20 @@ def gru(n, levels=1, m=64):
     Returns its constants as {name: (scale, start)} and the program that uses
     them, which leaves the score of every byte in y. A constant is learned as
     a tensor within -1 to 1, beginning at start, and is that tensor times
-    scale, rounded.
+    scale, rounded. Every weight begins at -1, 0 or 1, whatever the levels.
     """
     def rand(*shape):
         return torch.rand(shape) * 2 - 1
+
+    def weights(*shape):
+        return levels, rand(*shape) / levels
+
     k = 3 + levels.bit_length()  # the shift that brings a sum back to the range of the state
     consts = {
         'E': (127, rand(256, m)),
-        'Wz': (levels, rand(n, m)), 'Uz': (levels, rand(n, n)), 'bz': (127 << k, torch.full((n,), 0.5)),
-        'Wc': (levels, rand(n, m)), 'Uc': (levels, rand(n, n)), 'bc': (127 << k, torch.zeros(n)),
-        'Wy': (levels, rand(256, n)),
+        'Wz': weights(n, m), 'Uz': weights(n, n), 'bz': (127 << k, torch.full((n,), 0.5)),
+        'Wc': weights(n, m), 'Uc': weights(n, n), 'bc': (127 << k, torch.zeros(n)),
+        'Wy': weights(256, n),
     }
     program = f'''\
 in x 256
