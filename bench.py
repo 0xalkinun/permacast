@@ -19,6 +19,7 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+from concurrent.futures import ProcessPoolExecutor
 from math import prod
 from pathlib import Path
 
@@ -119,8 +120,9 @@ if __name__ == '__main__':
     parser.add_argument('--lanes', nargs='+', type=int, default=[1, 8, 32])
     parser.add_argument('--valid', type=Path, help='held-out text to score the models on')
     args = parser.parse_args()
-    models = [measure_model(p, args.valid) for p in args.models]
-    chips = [measure_chip(p, lanes) for p in args.models for lanes in args.lanes]
+    models = [measure_model(p, args.valid) for p in args.models]  # one at a time, since they are timed
+    with ProcessPoolExecutor() as pool:
+        chips = list(pool.map(measure_chip, *zip(*[(p, lanes) for p in args.models for lanes in args.lanes])))
     (ROOT / 'BENCH.md').write_text(
         '# Bench\n\n'
         + paragraph('What the compiler makes of each model, written by `python bench.py`. Every chip and '
