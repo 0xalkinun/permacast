@@ -4,9 +4,9 @@
 // ./cpu model.pc [seed] < input    prints the output of each step, a line each
 //
 // It trusts ref.py to have checked the model. Every value fits in 32 bits, so
-// arithmetic that wraps at 32 bits gives exact results. Constants that fit in
-// a byte are also kept as bytes, which makes a matrix four times smaller to
-// read. At the end it prints the steps per second to stderr.
+// arithmetic that wraps at 32 bits gives exact results. A matrix product whose
+// numbers all fit in 16 bits is done in 16 bits, which does twice the work in
+// each instruction. At the end it prints the steps per second to stderr.
 #define _POSIX_C_SOURCE 200809L
 #include <stdint.h>
 #include <stdio.h>
@@ -17,7 +17,7 @@
 enum { ROW, MATMUL, ADD, SUB, MUL, SHR, CLAMP, TAKE, ARGMAX, RAND, NOPS };
 static const char *OPS[NOPS] = {"row", "matmul", "add", "sub", "mul", "shr", "clamp", "take", "argmax", "rand"};
 
-typedef struct { char *name; int32_t *v; int8_t *bytes; int n, cols; } Value;  // n elements, in rows of cols
+typedef struct { char *name; int32_t *v; int16_t *halves; int n, cols; } Value;  // n elements, in rows of cols
 typedef struct { int op, y, a, b; int32_t k, lo, hi; } Line;   // y = op(a, b) with numbers k, lo, hi
 
 static Value values[4096];
@@ -58,10 +58,10 @@ static void load(FILE *f) {
                 if (getline(&line, &size, f) <= 0) exit(1);
                 for (char *s = strtok(line, " \t\n"); s; s = strtok(NULL, " \t\n")) c->v[i++] = atoi(s);
             }
-            c->bytes = malloc(c->n);
-            for (int i = 0; i < c->n && c->bytes; i++)
-                if (c->v[i] < -128 || c->v[i] > 127) free(c->bytes), c->bytes = NULL;
-                else c->bytes[i] = c->v[i];
+            c->halves = malloc(c->n * sizeof(int16_t));
+            for (int i = 0; i < c->n && c->halves; i++)
+                if (c->v[i] < INT16_MIN || c->v[i] > INT16_MAX) free(c->halves), c->halves = NULL;
+                else c->halves[i] = c->v[i];
         } else {
             Line l = {0};
             while (l.op < NOPS && strcmp(OPS[l.op], t[0])) l.op++;
@@ -89,7 +89,7 @@ static int32_t dot(const int32_t *restrict w, const int32_t *restrict a, int n) 
     return sum;
 }
 
-static int32_t dot_bytes(const int8_t *restrict w, const int32_t *restrict a, int n) {
+static int32_t dot_halves(const int16_t *restrict w, const int16_t *restrict a, int n) {
     int32_t sum = 0;
     for (int j = 0; j < n; j++) sum += w[j] * a[j];
     return sum;
@@ -109,14 +109,19 @@ static void step(int32_t x) {
     for (int i = 0; i < ncode; i++) {
         Line *l = &code[i];
         int32_t *y = values[l->y].v, *a = values[l->a].v, *b = values[l->b].v;
-        int8_t *bytes = values[l->a].bytes;
+        int16_t *halves = values[l->a].halves;
         int n = values[l->y].n, cols = values[l->a].cols;
         switch (l->op) {
         case ROW: memcpy(y, a + b[0] * cols, n * sizeof(int32_t)); break;
-        case MATMUL:
+        case MATMUL: {
+            int16_t half[cols];  // the vector, if it fits in 16 bits
+            for (int j = 0; j < cols && halves; j++)
+                if (b[j] < INT16_MIN || b[j] > INT16_MAX) halves = NULL;
+                else half[j] = b[j];
             for (int r = 0; r < n; r++)
-                y[r] = bytes ? dot_bytes(bytes + r * cols, b, cols) : dot(a + r * cols, b, cols);
+                y[r] = halves ? dot_halves(halves + r * cols, half, cols) : dot(a + r * cols, b, cols);
             break;
+        }
         case ADD: for (int e = 0; e < n; e++) y[e] = a[e] + b[e]; break;
         case SUB: for (int e = 0; e < n; e++) y[e] = a[e] - b[e]; break;
         case MUL: for (int e = 0; e < n; e++) y[e] = a[e] * b[e]; break;
