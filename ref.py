@@ -27,7 +27,10 @@ def check(ok, why):
 
 
 def token(t):
-    return int(t) if re.fullmatch('-?[0-9]+', t) else t
+    if re.fullmatch('-?[0-9]+', t):
+        return int(t)
+    check(re.fullmatch('[A-Za-z_][A-Za-z0-9_]*', t), f'{t}: not an integer or a name')
+    return t
 
 
 class Model:

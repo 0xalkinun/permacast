@@ -25,9 +25,10 @@ The first line is `permacast 0`. Each line after it is an operation, written
 as its name followed by its arguments, separated by spaces. Blank lines are
 ignored, and so is everything from a `#` to the end of its line.
 
-An integer is written in decimal, with a leading `-` if negative. Any other
-token is a name. An operation that creates a value gives it a new name, and a
-name can be used only on the lines after the one that creates it.
+An integer is written in decimal, with a leading `-` if negative. A name is a
+letter or underscore followed by letters, digits and underscores. An operation
+that creates a value gives it a new name, and a name can be used only on the
+lines after the one that creates it.
 
 ## Operations
 
