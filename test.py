@@ -72,7 +72,8 @@ def simulate(text, bench, data=(), lanes=1, **settings):
              *(ROOT / f for f in bench), 'permacast.v', '--Mdir', 'obj', '-o', 'sim'],
             ['./obj/sim', '+in=in', '+out=out', *(f'+{k}={v}' for k, v in settings.items())],
         ):
-            subprocess.run(command, cwd=tmp, check=True, capture_output=True)
+            result = subprocess.run(command, cwd=tmp, capture_output=True, text=True)
+            assert result.returncode == 0, result.stdout + result.stderr
         return Path(tmp, 'out').read_text()
 
 
