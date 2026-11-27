@@ -115,10 +115,11 @@ for (text, data, seed), lanes in zip([random_model(rng, 'pick') for _ in range(3
     model = Model(text, seed)
     expected = ''.join(f'{model.step(x)[0]}\n' for x in data)
     assert simulate(text, CHIP, data, lanes, seed=seed) == expected, text
-    model, x, expected = Model(text, seed % 1000), 0, ''
-    for _ in range(20):
+    taken, *written = simulate(text, CHIP, (), lanes, seed=seed % 1000, loop=20).split()
+    model, x = Model(text, int(taken)), 0
+    for y in written:
         x = int(model.step(x)[0])
-        expected += f'{x}\n'
-    assert simulate(text, CHIP, (), lanes, seed=seed % 1000, loop=20) == expected, text
+        assert int(y) == x, text
+    assert len(written) == 20
 
 print('ok')

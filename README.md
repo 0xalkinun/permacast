@@ -73,7 +73,7 @@ the bytes of any file, and compare with the reference:
     python ../ref.py ../model.pc < input | cmp - output
 
 To simulate the whole chip writing 300 bytes on its own, through its serial
-port, in the same folder:
+port, in the same folder (the first line of story is the seed it took):
 
     verilator --binary -Wno-WIDTHEXPAND --top chip_tb ../chip_tb.v ../chip.v \
         permacast.v --Mdir obj_chip -o sim

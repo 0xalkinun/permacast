@@ -5,9 +5,9 @@
 // +in=FILE     Send a few bytes and a break, to show that a break resets the
 //              chip. Then send the seed, and each byte of the file once the
 //              answer to the byte before has arrived.
-// +loop=COUNT  Leave the chip to run alone until it has sent COUNT bytes.
-//              Reset is held for as many clock cycles as the seed, which
-//              makes that number the chip's seed.
+// +loop=COUNT  Hold reset for as many clock cycles as the seed, then leave the
+//              chip to run alone until it has sent COUNT bytes. The first
+//              line written is the seed the chip took.
 //
 // It drives rx with nonblocking assignments, so that the chip never sees rx
 // change on the same clock edge it samples it.
@@ -62,6 +62,8 @@ module chip_tb;
             listen = 1;
             repeat (seed) @(posedge clk);
             rst <= 0;
+            wait (chip.seeded);
+            $fwrite(out, "%0d\n", chip.seed);
             wait (heard == count);
         end else begin
             if (!$value$plusargs("in=%s", path)) $finish;
