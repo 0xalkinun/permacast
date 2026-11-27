@@ -50,9 +50,10 @@ STEP = {  # the operations of ref.py, on batches of vectors
 }
 
 
-def gru(n, levels=1, m=64):
+def gru(n, levels=1, loops=1, m=64):
     """A gated recurrent model with n units, whose weights are integers from
-    -levels to levels.
+    -levels to levels. Its cell runs loops times on each byte, with the same
+    weights.
 
     Returns its constants as {name: (scale, start)} and the program that uses
     them, which leaves the score of every byte in y. A constant is learned as
@@ -77,24 +78,30 @@ in x 256
 state h {n} -127 127
 row e E x
 matmul zx Wz e       # z: how much of each unit to replace, 0 to 128
-matmul zh Uz h
-add z0 zx zh
-add z1 z0 bz
-shr z2 z1 {k}
-clamp z z2 0 128
 matmul cx Wc e       # c: the candidate state
-matmul ch Uc h
-add c0 cx ch
-add c1 c0 bc
-shr c2 c1 {k}
-clamp c c2 -127 127
-sub d c h            # h moves z/128 of the way to c
-mul u z d
-shr s u 7
-add h1 h s
-clamp h2 h1 -127 127
-next h h2
-matmul y Wy h2
+'''
+    for i in range(1, loops + 1):  # each run of the cell moves the state from h to h1, h1 to h2, ...
+        h = f'h{i - 1}' if i > 1 else 'h'
+        program += f'''\
+matmul zh{i} Uz {h}
+add za{i} zx zh{i}
+add zb{i} za{i} bz
+shr zc{i} zb{i} {k}
+clamp z{i} zc{i} 0 128
+matmul ch{i} Uc {h}
+add ca{i} cx ch{i}
+add cb{i} ca{i} bc
+shr cc{i} cb{i} {k}
+clamp c{i} cc{i} -127 127
+sub d{i} c{i} {h}            # h moves z/128 of the way to c
+mul u{i} z{i} d{i}
+shr s{i} u{i} 7
+add t{i} {h} s{i}
+clamp h{i} t{i} -127 127
+'''
+    program += f'''\
+next h h{loops}
+matmul y Wy h{loops}
 '''
     return consts, program
 
@@ -132,12 +139,13 @@ def main():
     parser.add_argument('--steps', type=int, default=20000)
     parser.add_argument('--units', type=int, default=512)
     parser.add_argument('--levels', type=int, default=1, help='weights are integers from -levels to levels')
+    parser.add_argument('--loops', type=int, default=1, help='runs of the cell on each byte')
     args = parser.parse_args()
 
     torch.manual_seed(0)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     train, valid = (torch.from_numpy(np.fromfile(f, np.uint8)) for f in (args.train, args.valid))
-    consts, program = gru(args.units, args.levels)
+    consts, program = gru(args.units, args.levels, args.loops)
     scale = {name: s for name, (s, _) in consts.items()}
     latent = {name: p.to(device).requires_grad_() for name, (_, p) in consts.items()}
 
