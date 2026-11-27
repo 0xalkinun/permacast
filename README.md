@@ -26,9 +26,12 @@ short program of integer operations.
 | [chip.v](chip.v) | The chip: a compiled model behind a serial port |
 | [chip_tb.v](chip_tb.v) | The testbench that talks to the chip through its serial port |
 | [test.py](test.py) | Tests the reference, the compiler and the chip |
+| [bench.py](bench.py) | Measures the chips the compiler makes, into [BENCH.md](BENCH.md) |
 
 The reference needs Python and NumPy, training needs PyTorch, and simulation
-needs [Verilator](https://verilator.org).
+needs [Verilator](https://verilator.org). The bench also needs
+[Yosys](https://yosyshq.net/yosys) and
+[nextpnr](https://github.com/YosysHQ/nextpnr) for the ECP5.
 
 ## Test
 
@@ -66,6 +69,13 @@ To simulate the whole chip writing 300 bytes on its own, in the same folder:
     ./obj_chip/sim +seed=1 +loop=300 +out=story
 
 [chip.v](chip.v) describes the serial protocol.
+
+## Bench
+
+    python bench.py model.pc
+
+This checks the compiled circuit against the reference, counts its clock ticks
+per step, and builds it for a Lattice ECP5 to get its size and fastest clock.
 
 ## Principles
 
