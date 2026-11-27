@@ -55,7 +55,9 @@ train on it:
 
 The exported model reads a byte and answers with its choice of the next one.
 Training ends by checking that the reference reproduces the trainer's scores
-exactly.
+exactly, and by scoring the model on held-out text. Options set the number of
+units, the range of the weights and how often the cell runs on each byte;
+`python train.py -h` lists them.
 
 ## Simulate
 
