@@ -8,6 +8,10 @@
 // +loop=COUNT  Leave the chip to run alone until it has sent COUNT bytes.
 //              Reset is held for as many clock cycles as the seed, which
 //              makes that number the chip's seed.
+//
+// It drives rx with nonblocking assignments, so that the chip never sees rx
+// change on the same clock edge it samples it.
+/* verilator lint_off INITIALDLY */
 module chip_tb;
     localparam DIVIDE = 8;
     reg clk = 0, rst = 1, loop = 0, rx = 1;
