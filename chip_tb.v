@@ -14,19 +14,33 @@
 /* verilator lint_off INITIALDLY */
 module chip_tb;
     localparam DIVIDE = 8;
-    reg clk = 0, rst = 1, loop = 0, rx = 1;
+    reg clk = 0, rst = 1, loop = 0, rx = 1, listen = 0;
     wire tx;
     reg [31:0] seed;
     reg [8191:0] path;
     reg [7:0] b;
-    integer in, out, c, count, n;
+    integer in, out, c, count, n, k, heard = 0;
 
     chip #(DIVIDE) chip (clk, rst, loop, rx, tx);
 
     always #1 clk = ~clk;
 
+    // Receive every byte the chip sends, and write those sent while listening.
+    always begin
+        @(negedge tx);
+        repeat (DIVIDE / 2) @(posedge clk);
+        repeat (8) begin
+            repeat (DIVIDE) @(posedge clk);
+            b = {tx, b[7:1]};
+        end
+        repeat (DIVIDE) @(posedge clk);
+        if (listen) begin
+            $fwrite(out, "%0d\n", b);
+            heard = heard + 1;
+        end
+    end
+
     task send(input [7:0] value);
-        integer k;
         begin
             rx <= 0;
             repeat (DIVIDE) @(posedge clk);
@@ -39,32 +53,20 @@ module chip_tb;
         end
     endtask
 
-    task receive;
-        integer k;
-        begin
-            @(negedge tx);
-            repeat (DIVIDE / 2) @(posedge clk);
-            for (k = 0; k < 8; k = k + 1) begin
-                repeat (DIVIDE) @(posedge clk);
-                b[k] = tx;
-            end
-            repeat (DIVIDE) @(posedge clk);
-            $fwrite(out, "%0d\n", b);
-        end
-    endtask
-
     initial begin
         if (!$value$plusargs("seed=%d", seed)) $finish;
         if (!$value$plusargs("out=%s", path)) $finish;
         out = $fopen(path, "w");
         if ($value$plusargs("loop=%d", count)) begin
             loop = 1;
+            listen = 1;
             repeat (seed) @(posedge clk);
             rst <= 0;
-            repeat (count) receive;
+            wait (heard == count);
         end else begin
             if (!$value$plusargs("in=%s", path)) $finish;
             in = $fopen(path, "rb");
+            count = 0;
             repeat (4) @(posedge clk);
             rst <= 0;
             for (n = 0; n < 5; n = n + 1) send(n[7:0] + 8'h5a);
@@ -72,12 +74,12 @@ module chip_tb;
             repeat (30 * DIVIDE) @(posedge clk);
             rx <= 1;
             repeat (DIVIDE) @(posedge clk);
+            listen = 1;
             for (n = 0; n < 4; n = n + 1) send(seed[8 * n +: 8]);
             for (c = $fgetc(in); c >= 0; c = $fgetc(in)) begin
-                fork
-                    send(c[7:0]);
-                    receive;
-                join
+                send(c[7:0]);
+                wait (heard == count + 1);
+                count = count + 1;
             end
         end
         $finish;
