@@ -20,6 +20,7 @@ short program of integer operations.
 |---|---|
 | [SPEC.md](SPEC.md) | Defines the model format |
 | [ref.py](ref.py) | The reference: runs a model and defines what is correct |
+| [stories.py](stories.py) | Fetches and prepares the text for the stories model |
 | [train.py](train.py) | Trains a model on a text file and exports it |
 | [compile.py](compile.py) | Compiles a model to Verilog |
 | [tb.v](tb.v) | The testbench that runs a compiled model in a simulator |
@@ -39,12 +40,13 @@ needs [Verilator](https://verilator.org). The bench also needs
 
 ## Train
 
-The first model learns to continue children's stories, one byte at a time,
-from the two text files of
-[TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories)
-(`TinyStoriesV2-GPT4-train.txt` and `TinyStoriesV2-GPT4-valid.txt`):
+The first model learns to continue children's stories, one byte at a time.
+Fetch and prepare the text of
+[TinyStories](https://huggingface.co/datasets/roneneldan/TinyStories), then
+train on it:
 
-    python train.py train.txt valid.txt model.pc
+    python stories.py
+    python train.py data/stories-train.txt data/stories-valid.txt model.pc
 
 The exported model reads a byte and answers with its choice of the next one.
 Training ends by checking that the reference reproduces the trainer's scores
