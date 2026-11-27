@@ -1,0 +1,11 @@
+// Pins of the Sipeed Tang Mega 138K Dock, from the board's constraints in
+// Project Apicula (examples/gw5a/tangmega138k.cst) and Sipeed's examples
+// (TangMega-138K-example). Not yet checked on a board.
+IO_LOC  "clk" V22;
+IO_PORT "clk" IO_TYPE=LVCMOS33 PULL_MODE=NONE BANK_VCCIO=3.3;
+IO_LOC  "reset_n" Y12;
+IO_PORT "reset_n" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC  "rx" V14;
+IO_PORT "rx" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;
+IO_LOC  "tx" U15;
+IO_PORT "tx" IO_TYPE=LVCMOS33 PULL_MODE=UP BANK_VCCIO=3.3;

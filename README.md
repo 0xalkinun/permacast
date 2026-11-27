@@ -27,6 +27,8 @@ short program of integer operations.
 | [tb.v](tb.v) | The testbench that runs a compiled model in a simulator |
 | [chip.v](chip.v) | The chip: a compiled model behind a serial port |
 | [chip_tb.v](chip_tb.v) | The testbench that talks to the chip through its serial port |
+| [boards](boards) | The chip on FPGA boards |
+| [host.py](host.py) | Lets a chip on a serial port write, and checks every byte |
 | [test.py](test.py) | Tests everything against the reference |
 | [bench.py](bench.py) | Measures the chips against the CPU, into [BENCH.md](BENCH.md) |
 
@@ -56,8 +58,9 @@ exactly.
 
 ## Simulate
 
-Compile a model with 8 lanes, simulate it on the bytes of any file, and
-compare with the reference:
+The compiler builds a chip from lanes that work side by side, so more lanes
+make a faster and larger chip. Compile a model with 8 lanes, simulate it on
+the bytes of any file, and compare with the reference:
 
     python compile.py model.pc out 8
     cd out
@@ -66,15 +69,22 @@ compare with the reference:
     ./obj/sim +in=input +out=output
     python ../ref.py ../model.pc < input | cmp - output
 
-To simulate the whole chip writing 300 bytes on its own, in the same folder:
+To simulate the whole chip writing 300 bytes on its own, through its serial
+port, in the same folder:
 
     verilator --binary -Wno-WIDTHEXPAND --top chip_tb ../chip_tb.v ../chip.v \
         permacast.v --Mdir obj_chip -o sim
     ./obj_chip/sim +seed=1 +loop=300 +out=story
 
-The lanes work side by side, so more lanes make a faster and larger chip. A
-matrix product takes one clock tick for each weight in a lane.
 [chip.v](chip.v) describes the serial protocol.
+
+## Run on a board
+
+[boards](boards) puts the chip on a Sipeed Tang Mega 138K Dock, though it has
+not been tried on a board yet. Once the board is loaded and reset, this lets
+the chip write, and checks every byte against the reference:
+
+    python host.py /dev/ttyUSB1 model.pc
 
 ## Bench
 
