@@ -98,8 +98,13 @@ def measure_chip(path, lanes):
         ticks = int(run('./obj/sim', '+in=in', '+out=out', cwd=tmp).split()[0])
         assert Path(tmp, 'out').read_text() == outputs(text, data), f'{path}: the chip differs from the reference'
         run('yosys', '-q', '-p', 'read_verilog permacast.v; synth_ecp5 -top permacast -json synth.json', cwd=tmp)
-        run('nextpnr-ecp5', '--85k', '--package', 'CABGA381', '--json', 'synth.json', '--seed', '1',
-            '--lpf-allow-unconstrained', '--timing-allow-fail', '--report', 'report.json', cwd=tmp)
+        try:
+            run('nextpnr-ecp5', '--85k', '--package', 'CABGA381', '--json', 'synth.json', '--seed', '1',
+                '--lpf-allow-unconstrained', '--timing-allow-fail', '--report', 'report.json', cwd=tmp)
+        except subprocess.CalledProcessError as e:
+            if 'no BELs remaining' not in e.stdout:
+                raise
+            return [path.stem, lanes, f'{ticks:,}', 'does not fit']
         report = json.loads(Path(tmp, 'report.json').read_text())
     (clock,) = (c['achieved'] for c in report['fmax'].values())
     cells = [report['utilization'][c]['used'] for c in ('TRELLIS_COMB', 'TRELLIS_FF', 'DP16KD', 'MULT18X18D')]
@@ -107,6 +112,7 @@ def measure_chip(path, lanes):
 
 
 def table(columns, rows):
+    rows = [row + [''] * (len(columns) - len(row)) for row in rows]
     return ''.join('| ' + ' | '.join(map(str, row)) + ' |\n' for row in [columns, ['---'] * len(columns), *rows])
 
 
