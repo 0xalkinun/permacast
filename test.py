@@ -91,7 +91,7 @@ def random_model(rng, out=None):
     return '\n'.join([
         'permacast 0', f'in x {i}', f'state h {n} -100 100', f'state o {m} -9 9',
         *const('E', i, m), *const('W', n, m), *const('U', n, n), *const('b', n), *const('V', m, n),
-        *const('T', 8), f'rand dice {m} 3',
+        *const('T', 8), f'rand dice {m} 3', f'rand coin {n} 1',  # coin is never read, but still drawn
         'row e E x', 'matmul p W e', 'matmul q U h', 'add s p q', 'mul t s b', 'shr u t 3',
         'sub v u h', 'clamp w v -100 100', 'next h w', 'matmul y V w', 'take luck T dice',
         'add lucky y luck', 'argmax pick lucky', 'mul z lucky o', 'shr f z 2', 'clamp c f -9 9',
