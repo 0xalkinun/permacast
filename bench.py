@@ -1,12 +1,13 @@
-"""Measure the chips the compiler makes.
+"""Measure the chips the compiler makes, against the CPU baseline.
 
 python bench.py model.pc ...    writes BENCH.md
 
 A circuit is measured only if it matches the reference. Its clock ticks per
 step come from simulation. Its size and its fastest clock come from building
-it for a Lattice ECP5 with open tools, which anyone can repeat.
+it for a Lattice ECP5 with open tools, which anyone can repeat. The CPU
+baseline must match the reference too.
 
-It needs Verilator, Yosys and nextpnr-ecp5.
+It needs a C compiler, Verilator, Yosys and nextpnr-ecp5.
 """
 import hashlib
 import json
@@ -22,8 +23,8 @@ from compile import bits
 from ref import Model
 
 ROOT = Path(__file__).parent
-COLUMNS = ['Model', 'SHA-256', 'Ticks per step', 'Clock, MHz', 'Steps per second', 'Logic cells',
-           'Flip-flops', 'Block RAMs', 'Multipliers', 'ROM, bits', 'RAM, bits']
+COLUMNS = ['Model', 'SHA-256', 'Ticks per step', 'Clock, MHz', 'Steps per second', 'CPU steps per second',
+           'Logic cells', 'Flip-flops', 'Block RAMs', 'Multipliers', 'ROM, bits', 'RAM, bits']
 
 
 def run(*command, cwd=None):
@@ -36,19 +37,35 @@ def version(tool, flag):
     return re.search(r'\d+\.\d+(\.\d+)?', run(tool, flag)).group()
 
 
+def processor():
+    return re.search(r'model name\s*: (.*)', Path('/proc/cpuinfo').read_text()).group(1).replace('(R)', '').replace('(TM)', '')
+
+
+def outputs(text, data):
+    """What the reference prints for a model."""
+    model = Model(text)
+    return ''.join(' '.join(map(str, model.step(x))) + '\n' for x in data)
+
+
 def measure(path):
     """The row of results for a model file."""
     text = path.read_text()
     model = Model(text)
-    data = bytes(i * 7 % min(256, model.range[model.input][1] + 1) for i in range(8))
-    expected = ''.join(' '.join(map(str, model.step(x))) + '\n' for x in data)
+    data = bytes(i * 7 % min(256, model.range[model.input][1] + 1) for i in range(10000))
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, 'in').write_bytes(data)
+        run('cc', '-O3', '-march=native', '-fwrapv', '-o', 'cpu', ROOT / 'cpu.c', cwd=tmp)
+        speeds = []
+        for _ in range(3):
+            result = subprocess.run(['./cpu', path.resolve()], cwd=tmp, input=data, capture_output=True, check=True)
+            assert result.stdout.decode() == outputs(text, data), f'{path}: the CPU differs from the reference'
+            speeds.append(int(result.stderr.split()[0]))
+        Path(tmp, 'in').write_bytes(data[:8])
         run(sys.executable, ROOT / 'compile.py', path.resolve(), '.', cwd=tmp)
         run('verilator', '--binary', '-Wno-WIDTHEXPAND', '-j', '0', '--top', 'tb', ROOT / 'tb.v',
             'permacast.v', '--Mdir', 'obj', '-o', 'sim', cwd=tmp)
         ticks = int(run('./obj/sim', '+in=in', '+out=out', cwd=tmp).split()[0])
-        assert Path(tmp, 'out').read_text() == expected, f'{path}: differs from the reference'
+        assert Path(tmp, 'out').read_text() == outputs(text, data[:8]), f'{path}: differs from the reference'
         run('yosys', '-q', '-p', 'read_verilog permacast.v; synth_ecp5 -top permacast -json synth.json',
             cwd=tmp)
         run('nextpnr-ecp5', '--85k', '--package', 'CABGA381', '--json', 'synth.json', '--seed', '1',
@@ -63,7 +80,7 @@ def measure(path):
                    for n in model.shape if n != model.input and (n in model.const) == constant)
 
     return [path.stem, hashlib.sha256(text.encode()).hexdigest()[:12], f'{ticks:,}', f'{clock:.1f}',
-            *(f'{n:,}' for n in (round(clock * 1e6 / ticks), *cells, stored(True), stored(False)))]
+            *(f'{n:,}' for n in (round(clock * 1e6 / ticks), max(speeds), *cells, stored(True), stored(False)))]
 
 
 if __name__ == '__main__':
@@ -76,6 +93,8 @@ if __name__ == '__main__':
         f"built with Yosys {version('yosys', '-V')} and nextpnr {version('nextpnr-ecp5', '--version')} "
         'at seed 1.',
         '- **ROM and RAM bits** are the memory the circuit declares, on any target.',
+        f"- **CPU steps per second** are for `cpu.c` built with GCC {version('cc', '--version')}, on one "
+        f'core of the {processor()}, the best of three runs of 10,000 steps.',
     ]
     (ROOT / 'BENCH.md').write_text(
         '# Bench\n\n' + textwrap.fill(notes[0], 79) + '\n\n'

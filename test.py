@@ -1,6 +1,6 @@
-"""Tests for ref.py and compile.py. Run: python test.py
+"""Tests for the reference, the CPU baseline, the compiler and the chip.
 
-The hardware tests need Verilator.
+python test.py    needs a C compiler and Verilator
 """
 import subprocess
 import sys
@@ -48,6 +48,17 @@ for old, new in INVALID:
     raise AssertionError(f'accepted: {new!r}')
 
 
+BUILD = tempfile.TemporaryDirectory()
+subprocess.run(['cc', '-O3', '-march=native', '-fwrapv', '-o', f'{BUILD.name}/cpu', ROOT / 'cpu.c'], check=True)
+
+
+def cpu(text, data, seed):
+    """What the CPU baseline prints for a model."""
+    Path(BUILD.name, 'model.pc').write_text(text)
+    return subprocess.run([f'{BUILD.name}/cpu', f'{BUILD.name}/model.pc', str(seed)], input=bytes(data),
+                          check=True, capture_output=True).stdout.decode()
+
+
 def simulate(text, bench, data=(), **settings):
     """What a testbench writes when it runs the compiled model in Verilator."""
     with tempfile.TemporaryDirectory() as tmp:
@@ -85,11 +96,13 @@ def random_model(rng, out=None):
     ]) + '\n', rng.integers(0, i, 20).tolist(), int(rng.integers(2**32))
 
 
-# The compiled model must agree with the reference on every output.
+# The CPU baseline and the compiled model must agree with the reference on
+# every output.
 rng = np.random.default_rng(0)
 for text, data, seed in [(EXAMPLE, [0, 1, 1], 1)] + [random_model(rng) for _ in range(6)]:
     model = Model(text, seed)
     expected = ''.join(' '.join(map(str, model.step(x))) + '\n' for x in data)
+    assert cpu(text, data, seed) == expected, text
     assert simulate(text, ['tb.v'], data, seed=seed) == expected, text
 
 # So must the chip, through its serial port: answering a host, and alone.

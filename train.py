@@ -50,8 +50,9 @@ STEP = {  # the operations of ref.py, on batches of vectors
 }
 
 
-def gru(n, m=64, k=4):
-    """A gated recurrent model with n units.
+def gru(n, levels=1, m=64):
+    """A gated recurrent model with n units, whose weights are integers from
+    -levels to levels.
 
     Returns its constants as {name: (scale, start)} and the program that uses
     them, which leaves the score of every byte in y. A constant is learned as
@@ -60,11 +61,12 @@ def gru(n, m=64, k=4):
     """
     def rand(*shape):
         return torch.rand(shape) * 2 - 1
+    k = 3 + levels.bit_length()  # the shift that brings a sum back to the range of the state
     consts = {
         'E': (127, rand(256, m)),
-        'Wz': (1, rand(n, m)), 'Uz': (1, rand(n, n)), 'bz': (127 << k, torch.full((n,), 0.5)),
-        'Wc': (1, rand(n, m)), 'Uc': (1, rand(n, n)), 'bc': (127 << k, torch.zeros(n)),
-        'Wy': (1, rand(256, n)),
+        'Wz': (levels, rand(n, m)), 'Uz': (levels, rand(n, n)), 'bz': (127 << k, torch.full((n,), 0.5)),
+        'Wc': (levels, rand(n, m)), 'Uc': (levels, rand(n, n)), 'bc': (127 << k, torch.zeros(n)),
+        'Wy': (levels, rand(256, n)),
     }
     program = f'''\
 in x 256
@@ -125,12 +127,13 @@ def main():
     parser.add_argument('out')
     parser.add_argument('--steps', type=int, default=20000)
     parser.add_argument('--units', type=int, default=512)
+    parser.add_argument('--levels', type=int, default=1, help='weights are integers from -levels to levels')
     args = parser.parse_args()
 
     torch.manual_seed(0)
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     train, valid = (torch.from_numpy(np.fromfile(f, np.uint8)) for f in (args.train, args.valid))
-    consts, program = gru(args.units)
+    consts, program = gru(args.units, args.levels)
     scale = {name: s for name, (s, _) in consts.items()}
     latent = {name: p.to(device).requires_grad_() for name, (_, p) in consts.items()}
 
