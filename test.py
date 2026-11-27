@@ -73,7 +73,7 @@ def simulate(text, bench, data=(), lanes=1, **settings):
             ['./obj/sim', '+in=in', '+out=out', *(f'+{k}={v}' for k, v in settings.items())],
         ):
             result = subprocess.run(command, cwd=tmp, capture_output=True, text=True)
-            assert result.returncode == 0, result.stdout + result.stderr
+            assert result.returncode == 0, (command, result.returncode, result.stdout + result.stderr)
         return Path(tmp, 'out').read_text()
 
 
