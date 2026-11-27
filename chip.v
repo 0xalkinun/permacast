@@ -6,7 +6,8 @@
 //
 // After reset the first four bytes received are the seed, lowest byte first.
 // Every byte after that is one step of the model, and the chip answers with
-// the model's output. Wait for the answer before sending the next byte.
+// the model's output. Wait for the answer before sending the next byte. A
+// break, rx held low for longer than two bytes, resets the chip.
 //
 // With loop high the chip needs no host. Its seed is the number of clock
 // cycles since power-up, its first input is 0, and it sends every output and
@@ -17,14 +18,17 @@ module chip #(parameter DIVIDE = 434) (
 );
     // Receiver. got is high for one cycle when data holds a new byte.
     reg [1:0] line = 3; // rx, brought onto the clock
+    reg [23:0] low = 0; // cycles that rx has been low, up to a break
+    wire reset = rst || low == 20 * DIVIDE;
     reg [15:0] rwait;   // cycles until the middle of the next bit
     reg [3:0] rbit;     // 0 when idle, 1 to 8 for the data bits, 9 for the stop bit
     reg [7:0] data;
     reg got;
     always @(posedge clk) begin
         line <= {line[0], rx};
+        low <= line[1] ? 0 : reset ? low : low + 1;
         got <= 0;
-        if (rst) rbit <= 0;
+        if (reset) rbit <= 0;
         else if (rbit == 0) begin
             if (!line[1]) begin rbit <= 1; rwait <= DIVIDE + DIVIDE / 2 - 1; end
         end else if (rwait != 0) rwait <= rwait - 1;
@@ -51,7 +55,7 @@ module chip #(parameter DIVIDE = 434) (
     reg [9:0] send;
     assign tx = tbit == 0 || send[0];
     always @(posedge clk) begin
-        if (rst) tbit <= 0;
+        if (reset) tbit <= 0;
         else if (valid) begin send <= {1'b1, y[7:0], 1'b0}; tbit <= 10; twait <= DIVIDE - 1; end
         else if (tbit != 0) begin
             if (twait != 0) twait <= twait - 1;
@@ -62,7 +66,7 @@ module chip #(parameter DIVIDE = 434) (
     always @(posedge clk) begin
         ticks <= ticks + 1;
         start <= 0;
-        if (rst) begin
+        if (reset) begin
             have <= 0; seeded <= 0; full <= 0;
         end else if (!seeded) begin  // the model is held in reset until it has its seed
             seeded <= have == 4;

@@ -2,13 +2,14 @@
 
 python host.py port model.pc [seed] [bytes]    e.g. port /dev/ttyUSB1
 
-Reset the chip first. The host sends it the seed, then a zero byte, then each
-byte the chip answers with, so the chip writes as it does on its own. Each
-answer is printed, and checked against the reference. The port is set to
+The host resets the chip with a break, then sends it the seed, a zero byte,
+and each byte the chip answers with, so the chip writes as it does on its own.
+Each answer is printed, and checked against the reference. The port is set to
 115200 baud with stty.
 """
 import subprocess
 import sys
+import termios
 
 from ref import Model
 
@@ -17,6 +18,7 @@ seed, count = (int(a) for a in rest + ['1', '-1'][len(rest):])
 model = Model(open(path).read(), seed)
 subprocess.run(['stty', '-f' if sys.platform == 'darwin' else '-F', port, '115200', 'raw', '-echo'], check=True)
 with open(port, 'r+b', buffering=0) as chip:
+    termios.tcsendbreak(chip.fileno(), 0)
     chip.write(seed.to_bytes(4, 'little'))
     x = 0
     while count:
