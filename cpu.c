@@ -4,9 +4,10 @@
 // ./cpu model.pc [seed] < input    prints the output of each step, a line each
 //
 // It trusts ref.py to have checked the model. Every value fits in 32 bits, so
-// arithmetic that wraps at 32 bits gives exact results. A matrix product whose
-// numbers all fit in 16 bits is done in 16 bits, which does twice the work in
-// each instruction. At the end it prints the steps per second to stderr.
+// arithmetic that wraps at 32 bits gives exact results. A matrix product is
+// done in 8 or 16 bits when all its numbers fit, since narrower numbers do more
+// work in each vector instruction. At the end it prints the steps per second
+// to stderr.
 #define _POSIX_C_SOURCE 200809L
 #include <stdint.h>
 #include <stdio.h>
@@ -17,7 +18,14 @@
 enum { ROW, MATMUL, ADD, SUB, MUL, SHR, CLAMP, TAKE, ARGMAX, RAND, NOPS };
 static const char *OPS[NOPS] = {"row", "matmul", "add", "sub", "mul", "shr", "clamp", "take", "argmax", "rand"};
 
-typedef struct { char *name; int32_t *v; int16_t *halves; int n, cols; } Value;  // n elements, in rows of cols
+typedef struct {      // n elements, in rows of cols
+    char *name;
+    int32_t *v;
+    int16_t *halves;  // v in 16 bits, if it fits
+    int8_t *bytes;    // v in 8 bits, if it fits
+    int32_t *sums;    // the sum of each row, times 128
+    int n, cols;
+} Value;
 typedef struct { int op, y, a, b; int32_t k, lo, hi; } Line;   // y = op(a, b) with numbers k, lo, hi
 
 static Value values[4096];
@@ -33,7 +41,7 @@ static int find(const char *name) {
 }
 
 static int create(const char *name, int n, int cols) {
-    values[nvalues] = (Value){strdup(name), calloc(n, sizeof(int32_t)), NULL, n, cols};
+    values[nvalues] = (Value){strdup(name), calloc(n, sizeof(int32_t)), NULL, NULL, NULL, n, cols};
     return nvalues++;
 }
 
@@ -62,6 +70,10 @@ static void load(FILE *f) {
             for (int i = 0; i < c->n && c->halves; i++)
                 if (c->v[i] < INT16_MIN || c->v[i] > INT16_MAX) free(c->halves), c->halves = NULL;
                 else c->halves[i] = c->v[i];
+            c->bytes = calloc((unsigned)c->n, 1), c->sums = calloc(c->n / c->cols, sizeof(int32_t));
+            for (int i = 0; i < c->n && c->bytes; i++)
+                if (c->v[i] < INT8_MIN || c->v[i] > INT8_MAX) free(c->bytes), c->bytes = NULL;
+                else c->bytes[i] = c->v[i], c->sums[i / c->cols] += 128 * c->v[i];
         } else {
             Line l = {0};
             while (l.op < NOPS && strcmp(OPS[l.op], t[0])) l.op++;
@@ -89,6 +101,12 @@ static int32_t dot(const int32_t *restrict w, const int32_t *restrict a, int n) 
     return sum;
 }
 
+static int32_t dot_bytes(const int8_t *restrict w, const uint8_t *restrict a, int n) {
+    int32_t sum = 0;
+    for (int j = 0; j < n; j++) sum += w[j] * a[j];
+    return sum;
+}
+
 static int32_t dot_halves(const int16_t *restrict w, const int16_t *restrict a, int n) {
     int32_t sum = 0;
     for (int j = 0; j < n; j++) sum += w[j] * a[j];
@@ -110,16 +128,22 @@ static void step(int32_t x) {
         Line *l = &code[i];
         int32_t *y = values[l->y].v, *a = values[l->a].v, *b = values[l->b].v;
         int16_t *halves = values[l->a].halves;
+        int8_t *bytes = values[l->a].bytes;
         int n = values[l->y].n, cols = values[l->a].cols;
         switch (l->op) {
         case ROW: memcpy(y, a + b[0] * cols, n * sizeof(int32_t)); break;
-        case MATMUL: {
-            int16_t half[cols];  // the vector, if it fits in 16 bits
-            for (int j = 0; j < cols && halves; j++)
+        case MATMUL: {  // in 8 bits if the numbers fit, with the vector moved up by 128, else 16 or 32
+            int16_t half[cols];
+            uint8_t byte[cols];
+            for (int j = 0; j < cols; j++) {
+                if (b[j] < INT8_MIN || b[j] > INT8_MAX) bytes = NULL;
                 if (b[j] < INT16_MIN || b[j] > INT16_MAX) halves = NULL;
-                else half[j] = b[j];
+                half[j] = b[j], byte[j] = b[j] + 128;
+            }
+            int32_t *sums = values[l->a].sums;
             for (int r = 0; r < n; r++)
-                y[r] = halves ? dot_halves(halves + r * cols, half, cols) : dot(a + r * cols, b, cols);
+                y[r] = bytes ? dot_bytes(bytes + r * cols, byte, cols) - sums[r]
+                     : halves ? dot_halves(halves + r * cols, half, cols) : dot(a + r * cols, b, cols);
             break;
         }
         case ADD: for (int e = 0; e < n; e++) y[e] = a[e] + b[e]; break;
