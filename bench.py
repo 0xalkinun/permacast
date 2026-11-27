@@ -1,6 +1,6 @@
 """Measure the chips the compiler makes, against the CPU and GPU baselines.
 
-python bench.py model.pc ... [--lanes 1 8 64] [--valid text]    writes BENCH.md
+python bench.py model.pc ... [--lanes 1 8 32] [--valid text]    writes BENCH.md
 
 Each model is scored on held-out text, if given, and compiled once for each
 number of lanes. A circuit is measured
@@ -116,7 +116,7 @@ def paragraph(text, indent=''):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('models', nargs='+', type=Path)
-    parser.add_argument('--lanes', nargs='+', type=int, default=[1, 8, 64])
+    parser.add_argument('--lanes', nargs='+', type=int, default=[1, 8, 32])
     parser.add_argument('--valid', type=Path, help='held-out text to score the models on')
     args = parser.parse_args()
     models = [measure_model(p, args.valid) for p in args.models]

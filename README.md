@@ -91,12 +91,12 @@ the chip write, and checks every byte against the reference:
 
 ## Bench
 
-    python bench.py model.pc --lanes 1 8 64
+    python bench.py model.pc --lanes 1 8 32 --valid data/stories-valid.txt
 
-For each number of lanes this checks the compiled circuit against the
-reference, counts its clock ticks per step, and builds it for a Lattice ECP5
-to get its size and fastest clock. It also times both baselines on the same
-model.
+This scores the model on held-out text and times both baselines on it. For
+each number of lanes it checks the compiled circuit against the reference,
+counts its clock ticks per step, and builds it for a Lattice ECP5 to get its
+size and fastest clock.
 
 ## Principles
 
