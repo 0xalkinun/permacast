@@ -177,6 +177,13 @@ def main():
         assert (reference.values['y'] == y).all(), 'reference differs'
     print(f'{args.out}: the reference matches the trainer on {len(x)} steps')
 
+    # What the chip writes when left alone: each output is its next input.
+    reference, x, story = Model(open(args.out).read()), 0, bytearray()
+    for _ in range(500):
+        x = int(reference.step(x)[0])
+        story.append(x)
+    print(story.decode(errors='replace'))
+
 
 if __name__ == '__main__':
     main()

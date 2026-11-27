@@ -48,30 +48,26 @@ for old, new in INVALID:
     raise AssertionError(f'accepted: {new!r}')
 
 
-def reference(text, data, seed):
-    """The output of a model for each input, a line per step."""
-    model = Model(text, seed)
-    return ''.join(' '.join(map(str, model.step(x))) + '\n' for x in data)
-
-
-def hardware(text, data, seed):
-    """The same, from the compiled model simulated by Verilator."""
+def simulate(text, bench, data=(), **settings):
+    """What a testbench writes when it runs the compiled model in Verilator."""
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, 'model.pc').write_text(text)
         Path(tmp, 'in').write_bytes(bytes(data))
         for command in (
             [sys.executable, ROOT / 'compile.py', 'model.pc', '.'],
-            ['verilator', '--binary', '-Wno-WIDTHEXPAND', '-j', '0', '--top', 'tb',
-             ROOT / 'tb.v', 'permacast.v', '--Mdir', 'obj', '-o', 'sim'],
-            ['./obj/sim', '+in=in', '+out=out', f'+seed={seed}'],
+            ['verilator', '--binary', '-Wno-WIDTHEXPAND', '-j', '0', '--top', bench[0][:-2],
+             *(ROOT / f for f in bench), 'permacast.v', '--Mdir', 'obj', '-o', 'sim'],
+            ['./obj/sim', '+in=in', '+out=out', *(f'+{k}={v}' for k, v in settings.items())],
         ):
             subprocess.run(command, cwd=tmp, check=True, capture_output=True)
         return Path(tmp, 'out').read_text()
 
 
-def random_model(rng):
+def random_model(rng, out=None):
     """A model of random sizes and constants that uses every operation."""
     i, m, n = (int(v) for v in rng.integers(1, 6, 3))
+    if out == 'pick':  # every output must be a valid input
+        i = max(i, m)
 
     def const(name, *shape):
         high = int(rng.choice([1, 9, 100]))
@@ -85,13 +81,27 @@ def random_model(rng):
         'row e E x', 'matmul p W e', 'matmul q U h', 'add s p q', 'mul t s b', 'shr u t 3',
         'sub v u h', 'clamp w v -100 100', 'next h w', 'matmul y V w', 'take luck T dice',
         'add lucky y luck', 'argmax pick lucky', 'mul z lucky o', 'shr f z 2', 'clamp c f -9 9',
-        'next o c', f'out {rng.choice(["lucky", "pick", "o", "e"])}',
-    ]) + '\n', rng.integers(0, i, 20).tolist(), int(rng.integers(1, 2**32))
+        'next o c', f'out {out or rng.choice(["lucky", "pick", "o", "e"])}',
+    ]) + '\n', rng.integers(0, i, 20).tolist(), int(rng.integers(2**32))
 
 
-# The hardware must agree with the reference on every output.
+# The compiled model must agree with the reference on every output.
 rng = np.random.default_rng(0)
 for text, data, seed in [(EXAMPLE, [0, 1, 1], 1)] + [random_model(rng) for _ in range(6)]:
-    assert hardware(text, data, seed) == reference(text, data, seed), text
+    model = Model(text, seed)
+    expected = ''.join(' '.join(map(str, model.step(x))) + '\n' for x in data)
+    assert simulate(text, ['tb.v'], data, seed=seed) == expected, text
+
+# So must the chip, through its serial port: answering a host, and alone.
+CHIP = ['chip_tb.v', 'chip.v']
+for text, data, seed in [random_model(rng, 'pick') for _ in range(3)]:
+    model = Model(text, seed)
+    expected = ''.join(f'{model.step(x)[0]}\n' for x in data)
+    assert simulate(text, CHIP, data, seed=seed) == expected, text
+    model, x, expected = Model(text, seed % 1000), 0, ''
+    for _ in range(20):
+        x = int(model.step(x)[0])
+        expected += f'{x}\n'
+    assert simulate(text, CHIP, seed=seed % 1000, loop=20) == expected, text
 
 print('ok')

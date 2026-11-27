@@ -23,7 +23,9 @@ short program of integer operations.
 | [train.py](train.py) | Trains a model on a text file and exports it |
 | [compile.py](compile.py) | Compiles a model to Verilog |
 | [tb.v](tb.v) | The testbench that runs a compiled model in a simulator |
-| [test.py](test.py) | Tests the reference and the compiler |
+| [chip.v](chip.v) | The chip: a compiled model behind a serial port |
+| [chip_tb.v](chip_tb.v) | The testbench that talks to the chip through its serial port |
+| [test.py](test.py) | Tests the reference, the compiler and the chip |
 
 The reference needs Python and NumPy, training needs PyTorch, and simulation
 needs [Verilator](https://verilator.org).
@@ -56,6 +58,14 @@ reference:
         --Mdir obj -o sim
     ./obj/sim +in=input +out=output
     python ../ref.py ../model.pc < input | cmp - output
+
+To simulate the whole chip writing 300 bytes on its own, in the same folder:
+
+    verilator --binary -Wno-WIDTHEXPAND --top chip_tb ../chip_tb.v ../chip.v \
+        permacast.v --Mdir obj_chip -o sim
+    ./obj_chip/sim +seed=1 +loop=300 +out=story
+
+[chip.v](chip.v) describes the serial protocol.
 
 ## Principles
 
