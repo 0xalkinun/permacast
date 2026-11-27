@@ -118,7 +118,7 @@ class Model:
                                   max(p * hi + n * lo for p, n in zip(pos, neg)))
         if op == 'take':
             t, a = args
-            check(len(shape[t]) == len(shape[a]) == 1, 'needs two vectors')
+            check(t in self.const and len(shape[t]) == len(shape[a]) == 1, 'needs a constant vector and a vector')
             check(0 <= rng[a][0] and rng[a][1] < shape[t][0], 'index can leave the table')
             return shape[a], rng[t]
         a, *rest = args

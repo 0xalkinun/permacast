@@ -47,7 +47,7 @@ lines after the one that creates it.
 | `mul y a b` | `y[i] = a[i] * b[i]` |
 | `shr y a k` | `y[i] = floor(a[i] / 2^k)`, with `k` ≥ 0. |
 | `clamp y a lo hi` | `y[i]` is `a[i]` limited to the range `lo` to `hi`. |
-| `take y t a` | `y[i] = t[a[i]]`. The bounds of `a` must lie within the indices of the vector `t`. |
+| `take y t a` | `y[i] = t[a[i]]`, where `t` is a constant vector. The bounds of `a` must lie within its indices. |
 | `argmax y a` | `y` has one element: the index of the largest element of `a`, and the smallest such index if several are equal. |
 | `rand y n b` | `y` is a vector of `n` random integers of `b` bits each, from 0 to 2^b − 1. |
 | `next h a` | After the step, state `h` takes the value of `a`. The bounds of `a` must lie within the range of `h`. |

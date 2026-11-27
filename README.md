@@ -56,10 +56,10 @@ exactly.
 
 ## Simulate
 
-Compile a model, simulate it on the bytes of any file, and compare with the
-reference:
+Compile a model with 8 lanes, simulate it on the bytes of any file, and
+compare with the reference:
 
-    python compile.py model.pc out
+    python compile.py model.pc out 8
     cd out
     verilator --binary -Wno-WIDTHEXPAND --top tb ../tb.v permacast.v \
         --Mdir obj -o sim
@@ -72,15 +72,18 @@ To simulate the whole chip writing 300 bytes on its own, in the same folder:
         permacast.v --Mdir obj_chip -o sim
     ./obj_chip/sim +seed=1 +loop=300 +out=story
 
+The lanes work side by side, so more lanes make a faster and larger chip. A
+matrix product takes one clock tick for each weight in a lane.
 [chip.v](chip.v) describes the serial protocol.
 
 ## Bench
 
-    python bench.py model.pc
+    python bench.py model.pc --lanes 1 8 64
 
-This checks the compiled circuit against the reference, counts its clock ticks
-per step, and builds it for a Lattice ECP5 to get its size and fastest clock.
-It also times the CPU baseline on the same model.
+For each number of lanes this checks the compiled circuit against the
+reference, counts its clock ticks per step, and builds it for a Lattice ECP5
+to get its size and fastest clock. It also times the CPU baseline on the same
+model.
 
 ## Principles
 

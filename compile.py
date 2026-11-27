@@ -1,15 +1,22 @@
 """Compile a Permacast model to Verilog.
 
-python compile.py model.pc out    writes out/permacast.v and a .hex file per constant
+python compile.py model.pc out [lanes]    writes the circuit into the folder out
 
 The circuit keeps every constant in a read-only memory and every vector in a
-memory of its own. It runs the operations of the model in order, each one
-element at a time, so a step takes about one clock cycle per number in the
-constants. Every memory is as wide as the bounds of its value require.
+memory of its own, each as wide as the bounds of its values require. It runs
+the operations of the model in order.
+
+Its lanes, a power of two, work side by side: a word of memory holds one
+element for each lane. A matrix product takes one clock tick per weight in a
+lane, and most other operations one tick per word. The operations whose
+elements follow one another, such as drawing random numbers, take one tick
+per element.
 """
 import sys
 from math import prod
 from pathlib import Path
+
+import numpy as np
 
 from ref import Model
 
@@ -26,69 +33,123 @@ def index(n):
     return max(1, (n - 1).bit_length())
 
 
-def verilog(m):
-    """The Verilog module for a model."""
-    names = [n for n in m.shape if n != m.input]
-    size = {n: prod(m.shape[n]) for n in names}
-    width = {n: bits(*m.range[n]) for n in names}
+def compile(m, lanes=1):
+    """The files of the circuit for a model: permacast.v and a .hex file per constant."""
+    L, lg = lanes, lanes.bit_length() - 1
+    assert L == 1 << lg, 'lanes must be a power of two'
+    size = {n: prod(s) for n, s in m.shape.items()}
+
+    def words(n):
+        return -(-n // L)
+
+    # How each memory is laid out. A vector holds its elements i*L to i*L + L - 1
+    # in word i. A matrix for matmul holds column j of rows g*L to g*L + L - 1 in
+    # word g*cols + j. A matrix for row holds each row in words of its own. A
+    # table for take holds one element per word.
+    layout = {}
+
+    def use(name, how):
+        if layout.setdefault(name, how) != how:
+            raise NotImplementedError(f'{name} is used in two ways')
+
+    for y, op, args in m.code:
+        names = [a for a in args if isinstance(a, str) and a != m.input]
+        if op in ('row', 'matmul', 'take'):
+            use(names.pop(0), {'row': 'row', 'matmul': 'matmul', 'take': 'table'}[op])
+        for n in names + [y]:
+            use(n, 'vector')
+    for n in [*m.state, *m.next.values(), *m.rand, m.output]:
+        use(n, 'vector')
+
+    def contents(n):
+        """The words of a constant, as rows of lanes."""
+        c, how = m.const[n], layout[n]
+        if how == 'table':
+            return c.reshape(-1, 1)
+        if how == 'vector':
+            return np.pad(c, (0, words(len(c)) * L - len(c))).reshape(-1, L)
+        rows, cols = c.shape
+        if how == 'row':
+            return np.pad(c, ((0, 0), (0, words(cols) * L - cols))).reshape(-1, L)
+        c = np.pad(c, ((0, words(rows) * L - rows), (0, 0)))
+        return c.reshape(-1, L, cols).transpose(0, 2, 1).reshape(-1, L)
+
+    const = {n: contents(n) for n in layout if n in m.const}
+    depth = {n: len(const[n]) if n in const else words(size[n]) for n in layout}
+    width = {n: bits(*m.range[n]) for n in layout}
     W = max(width.values())  # the widest value
-    N = index(max(size[n] for n in names if len(m.shape[n]) == 1))  # the longest vector
-    K = index(max(size.values()))  # the largest memory
     X = index(m.range[m.input][1] + 1)
+    K = index(max([depth[n] for n in layout if layout[n] in ('row', 'matmul')] + [1]))
+    J1 = f'j1[{lg - 1}:0]' if lg else '0'  # the lane of column j1
+    JP = 'jp' if lg else '0'              # the lane before that of column j
 
-    def lit(v):
-        return f"{'-' if v < 0 else ''}{W}'sd{abs(v)}"
+    def lane(n, p):
+        """Element p of the word read from memory n."""
+        w = width[n]
+        return f'q_{n}' if layout[n] == 'table' else f'$signed(q_{n}[{p}*{w} +: {w}])'
 
-    # Each operation of the circuit: (comment, destination, rows, columns, read, result).
-    # It computes one result per row, from the elements it reads, and stores it.
-    ops = [(f'clear {h}', h, size[h], 1, '', '0') for h in m.state]
+    # Each operation of the circuit: (comment, destination, rows, columns, columns
+    # of the last row, what it reads, the result of lane p). It reads its columns
+    # one tick each, then stores one word of results.
+    ops = []
+
+    def add(comment, y, rows, cols, read='', result='0', last=None):
+        ops.append((comment, y, rows, cols, last or cols, read, result))
+
+    for h in m.state:
+        add(f'clear {h}', h, words(size[h]), 1)
     first = len(ops)
-    ops += [(f'rand {y} {n} {b}', y, n, 1, '', f'gn[31:{32 - b}]') for y, (n, b) in m.rand.items()]
-    draws = ' || '.join(f'op == {i}' for i in range(first, len(ops)))
-    takes = {}  # table -> the operations that look it up, and the vectors of their indices
+    for y, (n, b) in m.rand.items():
+        add(f'rand {y} {n} {b}', y, words(n), L, '', f'j1 == p ? gn[31:{32 - b}] : acc', n - (words(n) - 1) * L)
+    draws = ' || '.join(f'op == {i}' for i in range(first, len(ops))) or '0'
     for y, op, (a, *rest) in m.code:
-        comment, rows, cols, read = ' '.join(map(str, (op, y, a, *rest))), size[y], 1, ''
+        comment, rows = ' '.join(map(str, (op, y, a, *rest))), words(size[y])
         if op == 'row':
-            read, result = f"base = x[{X - 1}:0] * {K}'d{size[y]}; ", f'q_{a}'
+            add(comment, y, rows, 1, f"base = x[{X - 1}:0] * {K}'d{rows}; ", lane(a, 'p'))
         elif op == 'matmul':
-            cols, read, result = size[rest[0]], 'a = j; ', f'acc + q_{a} * q_{rest[0]}'
-        elif op == 'take':  # two reads for each element: the index, then the table
-            cols, result = 2, f'q_{a}'
-            takes.setdefault(a, []).append((len(ops), rest[0]))
+            add(comment, y, rows, size[rest[0]], f'a = j >> {lg}; t = {lane(rest[0], J1)}; ', f'acc + {lane(a, "p")} * t')
+        elif op == 'take':  # in each row, read the word of indices, then the table once per lane
+            b, n = rest[0], size[y]
+            read = f'ta = q_{b}[{JP}*{width[b]} +: {min(width[b], index(size[a]))}]; '
+            add(comment, y, rows, L + 1, read, f'j1 == p + 1 ? q_{a} : acc', n - (rows - 1) * L + 1)
         elif op == 'argmax':  # acc holds the index of the largest element so far
-            cols, read, result = size[a], f'a = j; t = q_{a}; ', 'j1 == 0 || t > best ? j1 : acc'
+            read, result = f'a = j >> {lg}; t = {lane(a, J1)}; ', f'j1 == 0 || t > best ? j1[{index(size[a]) - 1}:0] : acc'
+            add(comment, y, 1, size[a], read, result)
         elif op == 'shr':
-            result = f'q_{a} >>> {rest[0]}'
+            add(comment, y, rows, 1, '', f'{lane(a, "p")} >>> {rest[0]}')
         elif op == 'clamp':  # limits outside the bounds of a never apply
-            lo, hi = (lit(v) for v in (max(rest[0], m.range[a][0]), min(rest[1], m.range[a][1])))
-            result = f'q_{a} < {lo} ? {lo} : q_{a} > {hi} ? {hi} : q_{a}'
+            lo, hi = (f"{'-' if v < 0 else ''}{W}'sd{abs(v)}"
+                      for v in (max(rest[0], m.range[a][0]), min(rest[1], m.range[a][1])))
+            add(comment, y, rows, 1, '', f'{lane(a, "p")} < {lo} ? {lo} : {lane(a, "p")} > {hi} ? {hi} : {lane(a, "p")}')
         else:
-            result = f'q_{a} {SIGN[op]} q_{rest[0]}'
-        ops.append((comment, y, rows, cols, read, result))
+            add(comment, y, rows, 1, '', f'{lane(a, "p")} {SIGN[op]} {lane(rest[0], "p")}')
     emit = len(ops)
-    ops.append((f'out {m.output}', None, size[m.output], 1, '', f'q_{m.output}'))
-    ops += [(f'next {h} {a}', h, size[h], 1, '', f'q_{a}') for h, a in m.next.items()]
+    add(f'out {m.output}', None, 1, size[m.output], f'a = j >> {lg}; t = {lane(m.output, J1)}; ')
+    for h, a in m.next.items():
+        add(f'next {h} {a}', h, words(size[h]), 1, '', lane(a, 'p'))
+    N = index(max([o[2] for o in ops] + [o[3] for o in ops] + list(depth.values()) + [L + 1]))
 
-    memories, reads, cases = [], [], []
-    for n in names:
-        memories.append(f'    reg signed [{width[n] - 1}:0] m_{n} [0:{size[n] - 1}], q_{n};')
-        if n in m.const:
+    memories, reads, wires, packs, cases, results = [], [], [], [], [], []
+    for n, how in layout.items():
+        w, at = width[n], {'table': 'ta', 'vector': 'a', 'matmul': 'k', 'row': 'k'}[how]
+        word = f'signed [{w - 1}:0]' if how == 'table' else f'[{L * w - 1}:0]'
+        memories.append(f'    reg {word} m_{n} [0:{depth[n] - 1}], q_{n};')
+        if n in const:
             memories.append(f'    initial $readmemh("{n}.hex", m_{n});')
-        at = f"{'k' if len(m.shape[n]) == 2 else 'a'}[{index(size[n]) - 1}:0]"
-        for i, a in takes.get(n, []):
-            q = f'q_{a}[{index(size[n]) - 1}:0]' if width[a] > index(size[n]) else f'q_{a}'
-            at = f'op == {i} && j == 1 ? {q} : {at}'
-        reads.append(f'        q_{n} <= m_{n}[{at}];')
+        reads.append(f'        q_{n} <= m_{n}[{at}[{index(depth[n]) - 1}:0]];')
         writers = ' || '.join(f'op == {i}' for i, o in enumerate(ops) if o[1] == n)
         if writers:
-            reads.append(f'        if (last1 && ({writers})) '
-                         f'm_{n}[i1[{index(size[n]) - 1}:0]] <= r[{width[n] - 1}:0];')
-    for i, (comment, _, rows, cols, read, result) in enumerate(ops):
-        cases.append(f"            {i}: begin imax = {N}'d{rows - 1}; jmax = {N}'d{cols - 1}; "
-                     f'{read}r = {result}; end  // {comment}')
+            reads.append(f'        if (last1 && ({writers})) m_{n}[i1[{index(depth[n]) - 1}:0]] <= r_{n};')
+            wires.append(f'    wire [{L * w - 1}:0] r_{n};')
+            packs.append(f'        assign r_{n}[p*{w} +: {w}] = r[{w - 1}:0];')
+    for i, (comment, _, rows, cols, last, read, result) in enumerate(ops):
+        jmax = f"{N}'d{cols - 1}" if last == cols else f"i == {N}'d{rows - 1} ? {N}'d{last - 1} : {N}'d{cols - 1}"
+        cases.append(f"            {i}: begin imax = {N}'d{rows - 1}; jmax = {jmax}; {read}end  // {comment}")
+        if result != '0':
+            results.append(f'                {i}: r = {result};')
     nl = '\n'
-    return f'''\
-// Generated by compile.py.
+    verilog = f'''\
+// Generated by compile.py, with {L} lanes.
 // Hold seed while rst is high. Then, for each step, hold x and raise start for
 // one cycle while ready. The elements of the output arrive on y, in order,
 // one in each cycle that valid is high.
@@ -102,25 +163,25 @@ module permacast (
 {nl.join(memories)}
 
     // op: the operation in progress. i, j: the row and column being read.
-    // k: the position in a matrix. run: an element is being read.
-    // v1: q holds an element, of row i1 and column j1. last1: it is the last
-    // of its row. acc: the result over the row so far. best: the largest
-    // element of the row so far. g: the random generator, and gn its next value.
+    // k: the position in a matrix. run: a column is being read. v1: q holds
+    // what was read, for row i1 and column j1. last1: it is the last column.
+    // best: the largest element so far. g: the random generator, gn its next
+    // value.
     reg [{index(len(ops)) - 1}:0] op;
     reg [{N - 1}:0] i, j, i1, j1;
     reg [{K - 1}:0] k;
     reg run, v1, last1;
-    reg signed [{W - 1}:0] acc, best;
+    reg signed [{W - 1}:0] best;
     reg [31:0] g;
     wire [31:0] g1 = g ^ (g << 13), g2 = g1 ^ (g1 >> 17), gn = g2 ^ (g2 << 5);
-
-    // Each operation: its last row and column, what it reads, the element it
-    // compares, and its result.
-    reg [{N - 1}:0] imax, jmax, a;
+{f"    wire [{lg - 1}:0] jp = j[{lg - 1}:0] - 1'b1;{nl}" if lg else ""}
+    // Each operation: its last row and column, the word a and table entry ta
+    // it reads, the first word base of its matrix, and t, an element it reads.
+    reg [{N - 1}:0] imax, jmax, a, ta;
     reg [{K - 1}:0] base;
-    reg signed [{W - 1}:0] t, r;
+    reg signed [{W - 1}:0] t;
     always @* begin
-        imax = 0; jmax = 0; a = i; base = 0; t = 0; r = 0;
+        imax = 0; jmax = 0; a = i; ta = 0; base = 0; t = 0;
         case (op)
 {nl.join(cases)}
         endcase
@@ -130,14 +191,28 @@ module permacast (
 {nl.join(reads)}
     end
 
+    // Each lane: its result r, and acc, its result so far in the row.
+{nl.join(wires)}
+    genvar p;
+    generate for (p = 0; p < {L}; p = p + 1) begin : lane
+        reg signed [{W - 1}:0] acc, r;
+        always @* begin
+            r = 0;
+            case (op)
+{nl.join(results)}
+            endcase
+        end
+        always @(posedge clk) acc <= v1 && !last1 ? r : 0;
+{nl.join(packs)}
+    end endgenerate
+
     always @(posedge clk) begin
         v1 <= run; last1 <= run && j == jmax; i1 <= i; j1 <= j;
-        acc <= v1 && !last1 ? r : 0;
         best <= j1 == 0 || t > best ? t : best;
-        if (last1 && ({draws or 0})) g <= gn;
+        if (v1 && ({draws})) g <= gn;
         if (rst) begin
             op <= 0; run <= 0; v1 <= 0; last1 <= 0; g <= seed;
-        end else if (run) begin  // read an element
+        end else if (run) begin  // read a column
             k <= k + 1;
             j <= j == jmax ? 0 : j + 1;
             if (j == jmax) begin i <= i + 1; run <= i != imax; end
@@ -149,16 +224,20 @@ module permacast (
     end
 
     assign ready = op == {first} && !run && !v1;
-    assign valid = last1 && op == {emit};
-    assign y = r;
+    assign valid = v1 && op == {emit};
+    assign y = t;
 endmodule
 '''
+    files = {'permacast.v': verilog}
+    for n, c in const.items():
+        w = width[n]
+        files[f'{n}.hex'] = '\n'.join(f'{sum((v & (1 << w) - 1) << p * w for p, v in enumerate(row)):x}'
+                                      for row in c.tolist()) + '\n'
+    return files
 
 
 if __name__ == '__main__':
     model, out = Model(open(sys.argv[1]).read()), Path(sys.argv[2])
     out.mkdir(exist_ok=True)
-    (out / 'permacast.v').write_text(verilog(model))
-    for name, c in model.const.items():
-        mask = (1 << bits(*model.range[name])) - 1
-        (out / f'{name}.hex').write_text('\n'.join(f'{v & mask:x}' for v in c.flatten().tolist()))
+    for name, text in compile(model, *map(int, sys.argv[3:])).items():
+        (out / name).write_text(text)

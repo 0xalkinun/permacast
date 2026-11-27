@@ -37,6 +37,7 @@ INVALID = [
     ('next h c\n', ''),                         # h has no next
     ('out d\n', ''),                            # no out
     ('out d', 'take t g d\nout d'),             # d can leave the indices of g
+    ('out d', 'take t h x\nout d'),             # h is not a constant
     ('out d', 'rand t 2 32\nout d'),            # t can leave 32 bits
 ]
 for old, new in INVALID:
@@ -59,13 +60,14 @@ def cpu(text, data, seed):
                           check=True, capture_output=True).stdout.decode()
 
 
-def simulate(text, bench, data=(), **settings):
-    """What a testbench writes when it runs the compiled model in Verilator."""
+def simulate(text, bench, data=(), lanes=1, **settings):
+    """What a testbench writes when it runs the model, compiled with a number of
+    lanes, in Verilator."""
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, 'model.pc').write_text(text)
         Path(tmp, 'in').write_bytes(bytes(data))
         for command in (
-            [sys.executable, ROOT / 'compile.py', 'model.pc', '.'],
+            [sys.executable, ROOT / 'compile.py', 'model.pc', '.', str(lanes)],
             ['verilator', '--binary', '-Wno-WIDTHEXPAND', '-j', '0', '--top', bench[0][:-2],
              *(ROOT / f for f in bench), 'permacast.v', '--Mdir', 'obj', '-o', 'sim'],
             ['./obj/sim', '+in=in', '+out=out', *(f'+{k}={v}' for k, v in settings.items())],
@@ -76,7 +78,7 @@ def simulate(text, bench, data=(), **settings):
 
 def random_model(rng, out=None):
     """A model of random sizes and constants that uses every operation."""
-    i, m, n = (int(v) for v in rng.integers(1, 6, 3))
+    i, m, n = (int(v) for v in rng.integers(1, 13, 3))
     if out == 'pick':  # every output must be a valid input
         i = max(i, m)
 
@@ -99,22 +101,23 @@ def random_model(rng, out=None):
 # The CPU baseline and the compiled model must agree with the reference on
 # every output.
 rng = np.random.default_rng(0)
-for text, data, seed in [(EXAMPLE, [0, 1, 1], 1)] + [random_model(rng) for _ in range(6)]:
+models = [(EXAMPLE, [0, 1, 1], 1)] * 2 + [random_model(rng) for _ in range(10)]
+for (text, data, seed), lanes in zip(models, [1, 2, 1, 2, 4, 8] * 2):
     model = Model(text, seed)
     expected = ''.join(' '.join(map(str, model.step(x))) + '\n' for x in data)
     assert cpu(text, data, seed) == expected, text
-    assert simulate(text, ['tb.v'], data, seed=seed) == expected, text
+    assert simulate(text, ['tb.v'], data, lanes, seed=seed) == expected, (lanes, text)
 
 # So must the chip, through its serial port: answering a host, and alone.
 CHIP = ['chip_tb.v', 'chip.v']
-for text, data, seed in [random_model(rng, 'pick') for _ in range(3)]:
+for (text, data, seed), lanes in zip([random_model(rng, 'pick') for _ in range(3)], [1, 2, 4]):
     model = Model(text, seed)
     expected = ''.join(f'{model.step(x)[0]}\n' for x in data)
-    assert simulate(text, CHIP, data, seed=seed) == expected, text
+    assert simulate(text, CHIP, data, lanes, seed=seed) == expected, text
     model, x, expected = Model(text, seed % 1000), 0, ''
     for _ in range(20):
         x = int(model.step(x)[0])
         expected += f'{x}\n'
-    assert simulate(text, CHIP, seed=seed % 1000, loop=20) == expected, text
+    assert simulate(text, CHIP, (), lanes, seed=seed % 1000, loop=20) == expected, text
 
 print('ok')
