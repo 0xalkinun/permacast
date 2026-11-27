@@ -1,8 +1,9 @@
 """Measure the chips the compiler makes, against the CPU and GPU baselines.
 
-python bench.py model.pc ... [--lanes 1 8 64]    writes BENCH.md
+python bench.py model.pc ... [--lanes 1 8 64] [--valid text]    writes BENCH.md
 
-Each model is compiled once for each number of lanes. A circuit is measured
+Each model is scored on held-out text, if given, and compiled once for each
+number of lanes. A circuit is measured
 only if it matches the reference. Its clock ticks per step come from
 simulation, and its size and fastest clock from building it for a Lattice
 ECP5 with open tools, which anyone can repeat. The baselines must match the
@@ -21,9 +22,11 @@ import textwrap
 from math import prod
 from pathlib import Path
 
+import numpy as np
 import torch
 
 import gpu
+import train
 from compile import bits
 from ref import Model
 
@@ -57,8 +60,9 @@ def inputs(model, n):
     return bytes(i * 7 % min(256, model.range[model.input][1] + 1) for i in range(n))
 
 
-def measure_model(path):
-    """The memory of a model, and the steps per second of the baselines."""
+def measure_model(path, valid):
+    """The memory of a model, its bits per byte on the held-out text, and the
+    steps per second of the baselines."""
     text = path.read_text()
     model = Model(text)
     data = inputs(model, STEPS)
@@ -76,8 +80,9 @@ def measure_model(path):
                    for n in model.shape if n != model.input and (n in model.const) == constant)
 
     alone, together = gpu.speed(text, 2000), gpu.speed(text, 200, STREAMS) * STREAMS
+    quality = f'{train.evaluate(text, np.fromfile(valid, np.uint8)):.3f}' if valid else ''
     return [path.stem, hashlib.sha256(text.encode()).hexdigest()[:12], f'{stored(True):,}', f'{stored(False):,}',
-            *(f'{round(n):,}' for n in (max(speeds), alone, together))]
+            quality, *(f'{round(n):,}' for n in (max(speeds), alone, together))]
 
 
 def measure_chip(path, lanes):
@@ -112,8 +117,9 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('models', nargs='+', type=Path)
     parser.add_argument('--lanes', nargs='+', type=int, default=[1, 8, 64])
+    parser.add_argument('--valid', type=Path, help='held-out text to score the models on')
     args = parser.parse_args()
-    models = [measure_model(p) for p in args.models]
+    models = [measure_model(p, args.valid) for p in args.models]
     chips = [measure_chip(p, lanes) for p in args.models for lanes in args.lanes]
     (ROOT / 'BENCH.md').write_text(
         '# Bench\n\n'
@@ -122,12 +128,15 @@ if __name__ == '__main__':
         + '\n## Models\n\n'
         + paragraph('- **ROM and RAM bits** are the memory the model declares: its constants, and every '
                     'other vector.', '  ')
+        + (paragraph(f'- **Bits per byte** are the cross-entropy of the next byte on {args.valid.name}, in its '
+                     f'first 2,048 windows of {train.TIME} bytes, each begun from zero state. Lower is '
+                     'better.', '  ') if args.valid else '')
         + paragraph(f"- **CPU steps per second** are for `cpu.c` built with GCC {version('cc', '--version')}, "
                     f'on one core of the {processor()}, the best of three runs of {STEPS:,} steps.', '  ')
         + paragraph(f'- **GPU steps per second** are for `gpu.py` with PyTorch {torch.__version__.split("+")[0]} on '
                     f'an {torch.cuda.get_device_name()}: one stream, and {STREAMS:,} streams together.', '  ')
-        + '\n' + table(['Model', 'SHA-256', 'ROM, bits', 'RAM, bits', 'CPU steps per second', 'GPU steps per second',
-                        f'GPU, {STREAMS:,} streams'], models)
+        + '\n' + table(['Model', 'SHA-256', 'ROM, bits', 'RAM, bits', 'Bits per byte', 'CPU steps per second',
+                        'GPU steps per second', f'GPU, {STREAMS:,} streams'], models)
         + '\n## Chips\n\n'
         + paragraph(f"- **Ticks per step** are counted in simulation with Verilator "
                     f"{version('verilator', '--version')}.", '  ')

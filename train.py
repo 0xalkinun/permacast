@@ -131,6 +131,21 @@ def run(model, consts, x):
     return torch.stack(outs, 1)
 
 
+def evaluate(text, data, windows=2048, device='cuda'):
+    """The bits per byte of an exported model on the first windows of the data,
+    each TIME bytes long and begun from zero state."""
+    model = Model(text.replace(CHOOSE, 'out y\n'))
+    consts = {n: torch.tensor(c, dtype=torch.float, device=device) for n, c in model.const.items()}
+    x = torch.from_numpy(data[:windows * (TIME + 1)].reshape(windows, TIME + 1).copy()).long()
+    total = 0
+    with torch.no_grad():
+        for batch in x.split(256):
+            batch = batch.to(device)
+            y = run(model, consts, batch[:, :-1])
+            total += F.cross_entropy(y.flatten(0, 1) / SCALE, batch[:, 1:].flatten(), reduction='sum').item()
+    return total / (windows * TIME) / math.log(2)
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('train')
@@ -191,6 +206,7 @@ def main():
         reference.step(int(b))
         assert (reference.values['y'] == y).all(), 'reference differs'
     print(f'{args.out}: the reference matches the trainer on {len(x)} steps')
+    print(f'{evaluate(open(args.out).read(), valid.numpy(), device=device):.4f} bits per byte on held-out text')
 
     # What the chip writes when left alone: each output is its next input.
     reference, x, story = Model(open(args.out).read()), 0, bytearray()
