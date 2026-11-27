@@ -41,7 +41,8 @@ from the two text files of
 
     python train.py train.txt valid.txt model.pc
 
-Training ends by checking that the reference reproduces the trainer's outputs
+The exported model reads a byte and answers with its choice of the next one.
+Training ends by checking that the reference reproduces the trainer's scores
 exactly.
 
 ## Simulate

@@ -5,6 +5,9 @@ python train.py train.txt valid.txt model.pc
 A model is a program in the format of SPEC.md whose constants are learned.
 Training runs that program on floats that hold exact integers, so the exported
 file computes what was trained. The reference then confirms it, bit for bit.
+
+The program gives every byte a score. The exported model ends by choosing a
+byte at random, the likeliest most often.
 """
 import argparse
 import math
@@ -15,8 +18,20 @@ import torch.nn.functional as F
 
 from ref import Model
 
-SCALE = 256  # the loss reads the output as logits in units of 1/SCALE
+SCALE = 256  # the loss reads the scores as logits in units of 1/SCALE
 BATCH, TIME, RATE = 128, 256, 1e-2
+TEMPERATURE = 0.7  # below 1, the exported model favours the likeliest bytes more
+
+# Adding Gumbel noise to the scores and taking the largest chooses byte i with
+# probability proportional to exp(y[i] / (SCALE * TEMPERATURE)).
+GUMBEL = np.round(-np.log(-np.log((np.arange(256) + 0.5) / 256)) * SCALE * TEMPERATURE).astype(int)
+CHOOSE = '''\
+rand roll 256 8
+take noise GUMBEL roll
+add noisy y noise
+argmax choice noisy
+out choice
+'''
 
 
 def ste(x, y):
@@ -39,8 +54,9 @@ def gru(n, m=64, k=4):
     """A gated recurrent model with n units.
 
     Returns its constants as {name: (scale, start)} and the program that uses
-    them. A constant is learned as a tensor within -1 to 1, beginning at
-    start, and is that tensor times scale, rounded.
+    them, which leaves the score of every byte in y. A constant is learned as
+    a tensor within -1 to 1, beginning at start, and is that tensor times
+    scale, rounded.
     """
     def rand(*shape):
         return torch.rand(shape) * 2 - 1
@@ -73,7 +89,6 @@ add h1 h s
 clamp h2 h1 -127 127
 next h h2
 matmul y Wy h2
-out y
 '''
     return consts, program
 
@@ -122,8 +137,9 @@ def main():
     def quantized():
         return {name: ste(p * scale[name], (p * scale[name]).round()) for name, p in latent.items()}
 
-    def text():
-        return export({name: c.long().cpu().numpy() for name, c in quantized().items()}, program)
+    def text(end, **more):
+        consts = {name: c.long().cpu().numpy() for name, c in quantized().items()}
+        return export({**consts, **more}, program + end)
 
     def loss(data):
         """Bits per byte on random windows of the data."""
@@ -132,7 +148,7 @@ def main():
         y = run(model, quantized(), x[:, :-1])
         return F.cross_entropy(y.flatten(0, 1) / SCALE, x[:, 1:].flatten()) / math.log(2)
 
-    model = Model(text())  # checks the program before any training
+    model = Model(text('out y\n'))  # checks the program before any training
     optimizer = torch.optim.Adam(latent.values(), RATE)
     schedule = torch.optim.lr_scheduler.OneCycleLR(optimizer, RATE, total_steps=max(args.steps, 1))
     for step in range(args.steps):
@@ -149,14 +165,16 @@ def main():
                 print(f'step {step}: train {bits.item():.3f}, valid {held:.3f} bits per byte', flush=True)
 
     with open(args.out, 'w') as f:
-        f.write(text())
+        f.write(text(CHOOSE, GUMBEL=GUMBEL))
 
-    # The reference must agree with the trainer on every output.
+    # The reference must agree with the trainer on every score.
     reference = Model(open(args.out).read())
     x = valid[:1000]
     with torch.no_grad():
         trained = run(model, quantized(), x[None].to(device).long())[0].long().cpu().numpy()
-    assert all((reference.step(int(b)) == y).all() for b, y in zip(x, trained)), 'reference differs'
+    for b, y in zip(x, trained):
+        reference.step(int(b))
+        assert (reference.values['y'] == y).all(), 'reference differs'
     print(f'{args.out}: the reference matches the trainer on {len(x)} steps')
 
 

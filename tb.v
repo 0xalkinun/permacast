@@ -1,19 +1,21 @@
 // Testbench for a compiled model. It feeds the bytes of one file to the model
 // and writes the output of each step to another, a line per step, in the same
-// form as ref.py. Run it with +in=FILE +out=FILE.
+// form as ref.py. Run it with +in=FILE +out=FILE, and +seed=NUMBER to set a
+// seed other than 1.
 module tb;
     reg clk = 0, rst = 1, start = 0, first = 1;
-    reg [31:0] x;
+    reg [31:0] seed, x;
     wire ready, valid;
     wire signed [31:0] y;
     reg [8191:0] path;
     integer in, out, c;
 
-    permacast model (clk, rst, start, x, ready, valid, y);
+    permacast model (clk, rst, start, seed, x, ready, valid, y);
 
     always #1 clk = ~clk;
 
     initial begin
+        if (!$value$plusargs("seed=%d", seed)) seed = 1;
         if (!$value$plusargs("in=%s", path)) $finish;
         in = $fopen(path, "rb");
         if (!$value$plusargs("out=%s", path)) $finish;

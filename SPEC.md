@@ -2,11 +2,13 @@
 
 A model is a text file. It defines one function, `step`, which takes an input
 integer and returns a vector of integers. The model keeps state between steps,
-so its output depends on every input so far.
+so its output depends on every input so far. It can also draw random numbers,
+which depend only on a seed chosen before the first step.
 
 Every implementation, in software or hardware, must return exactly the same
-integers for the same sequence of inputs. [ref.py](ref.py) is this document in
-executable form, and all other implementations are tested against it.
+integers for the same seed and sequence of inputs. [ref.py](ref.py) is this
+document in executable form, and all other implementations are tested against
+it.
 
 ## Values
 
@@ -14,10 +16,10 @@ Every value is a signed integer, and all arithmetic is exact. A value is the
 input (a single integer), a vector, or a constant matrix.
 
 Each value has bounds that hold on every step. They follow by interval
-arithmetic from the range of the input, the declared ranges of the states and
-the numbers in the constants. A model is valid only if the bounds of every
-value lie within 32 bits, from −2³¹ to 2³¹ − 1. Hardware uses the bounds to
-give each value only the bits it needs.
+arithmetic from the range of the input, the declared ranges of the states,
+the sizes of the random numbers and the numbers in the constants. A model is
+valid only if the bounds of every value lie within 32 bits, from −2³¹ to
+2³¹ − 1. Hardware uses the bounds to give each value only the bits it needs.
 
 ## File
 
@@ -45,6 +47,9 @@ lines after the one that creates it.
 | `mul y a b` | `y[i] = a[i] * b[i]` |
 | `shr y a k` | `y[i] = floor(a[i] / 2^k)`, with `k` ≥ 0. |
 | `clamp y a lo hi` | `y[i]` is `a[i]` limited to the range `lo` to `hi`. |
+| `take y t a` | `y[i] = t[a[i]]`. The bounds of `a` must lie within the indices of the vector `t`. |
+| `argmax y a` | `y` has one element: the index of the largest element of `a`, and the smallest such index if several are equal. |
+| `rand y n b` | `y` is a vector of `n` random integers of `b` bits each, from 0 to 2^b − 1. |
 | `next h a` | After the step, state `h` takes the value of `a`. The bounds of `a` must lie within the range of `h`. |
 | `out a` | The step returns the vector `a`. |
 
@@ -54,6 +59,25 @@ state gives its value from before the step, wherever the `next` line is.
 
 The format puts no limit on the numbers in a constant, but hardware pays for
 them: a matrix of only −1, 0 and 1 needs no multipliers.
+
+## Random numbers
+
+A model has one random generator, a 32-bit number `s`. Before the first step
+`s` is the seed, which is from 0 to 2³² − 1. At the start of each step the
+`rand` lines are filled in file order, one element after another. Each
+element first changes `s` in three stages, keeping its low 32 bits, and then
+takes the top `b` bits of `s`:
+
+    s = s xor (s << 13)
+    s = s xor (s >> 17)
+    s = s xor (s << 5)
+
+A seed of zero stays zero, so every random number is zero and the model
+always does the same thing.
+
+With `rand`, `take` and `argmax` a model can choose its own output. Adding a
+table of random noise to a vector of scores and taking the `argmax` picks an
+index at random, with the likeliest picked most often.
 
 ## Example
 

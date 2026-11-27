@@ -36,6 +36,8 @@ INVALID = [
     ('sub d c h', 'neg d c'),                   # unknown operation
     ('next h c\n', ''),                         # h has no next
     ('out d\n', ''),                            # no out
+    ('out d', 'take t g d\nout d'),             # d can leave the indices of g
+    ('out d', 'rand t 2 32\nout d'),            # t can leave 32 bits
 ]
 for old, new in INVALID:
     assert old in EXAMPLE, old
@@ -46,13 +48,13 @@ for old, new in INVALID:
     raise AssertionError(f'accepted: {new!r}')
 
 
-def reference(text, data):
+def reference(text, data, seed):
     """The output of a model for each input, a line per step."""
-    model = Model(text)
+    model = Model(text, seed)
     return ''.join(' '.join(map(str, model.step(x))) + '\n' for x in data)
 
 
-def hardware(text, data):
+def hardware(text, data, seed):
     """The same, from the compiled model simulated by Verilator."""
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, 'model.pc').write_text(text)
@@ -61,7 +63,7 @@ def hardware(text, data):
             [sys.executable, ROOT / 'compile.py', 'model.pc', '.'],
             ['verilator', '--binary', '-Wno-WIDTHEXPAND', '-j', '0', '--top', 'tb',
              ROOT / 'tb.v', 'permacast.v', '--Mdir', 'obj', '-o', 'sim'],
-            ['./obj/sim', '+in=in', '+out=out'],
+            ['./obj/sim', '+in=in', '+out=out', f'+seed={seed}'],
         ):
             subprocess.run(command, cwd=tmp, check=True, capture_output=True)
         return Path(tmp, 'out').read_text()
@@ -79,15 +81,17 @@ def random_model(rng):
     return '\n'.join([
         'permacast 0', f'in x {i}', f'state h {n} -100 100', f'state o {m} -9 9',
         *const('E', i, m), *const('W', n, m), *const('U', n, n), *const('b', n), *const('V', m, n),
+        *const('T', 8), f'rand dice {m} 3',
         'row e E x', 'matmul p W e', 'matmul q U h', 'add s p q', 'mul t s b', 'shr u t 3',
-        'sub v u h', 'clamp w v -100 100', 'next h w', 'matmul y V w', 'mul z y o', 'shr f z 2',
-        'clamp c f -9 9', 'next o c', f'out {rng.choice(["y", "o", "e"])}',
-    ]) + '\n', rng.integers(0, i, 20).tolist()
+        'sub v u h', 'clamp w v -100 100', 'next h w', 'matmul y V w', 'take luck T dice',
+        'add lucky y luck', 'argmax pick lucky', 'mul z lucky o', 'shr f z 2', 'clamp c f -9 9',
+        'next o c', f'out {rng.choice(["lucky", "pick", "o", "e"])}',
+    ]) + '\n', rng.integers(0, i, 20).tolist(), int(rng.integers(1, 2**32))
 
 
 # The hardware must agree with the reference on every output.
 rng = np.random.default_rng(0)
-for text, data in [(EXAMPLE, [0, 1, 1])] + [random_model(rng) for _ in range(4)]:
-    assert hardware(text, data) == reference(text, data), text
+for text, data, seed in [(EXAMPLE, [0, 1, 1], 1)] + [random_model(rng) for _ in range(6)]:
+    assert hardware(text, data, seed) == reference(text, data, seed), text
 
 print('ok')

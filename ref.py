@@ -1,6 +1,6 @@
 """Reference interpreter for Permacast models: SPEC.md in executable form.
 
-python ref.py model.pc < input    prints the output of each step, one per line
+python ref.py model.pc [seed] < input    prints the output of each step, a line each
 """
 import re
 import sys
@@ -18,6 +18,8 @@ STEP = {
     'mul': lambda v, a, b: v[a] * v[b],
     'shr': lambda v, a, k: v[a] >> k,
     'clamp': lambda v, a, lo, hi: v[a].clip(lo, hi),
+    'take': lambda v, t, a: v[t][v[a]],
+    'argmax': lambda v, a: v[a].argmax(keepdims=True),
 }
 
 
@@ -36,17 +38,21 @@ def token(t):
 class Model:
     """A validated model. step(x) takes one input and returns the output vector."""
 
-    def __init__(self, text):
+    def __init__(self, text, seed=1):
         lines = (line.split('#')[0].split() for line in text.splitlines())
         lines = ([token(t) for t in line] for line in lines if line)
         check(next(lines, None) == ['permacast', 0], 'missing header "permacast 0"')
         self.const = {}  # name -> array
         self.state = {}  # name -> array, zero before the first step
+        self.rand = {}   # name -> (size, bits) of a random vector
         self.code = []   # (name, operation, arguments) in file order
         self.next = {}   # state -> the value it takes after each step
         self.shape = {}  # name -> shape, () for the input
         self.range = {}  # name -> (lo, hi), bounds that hold on every step
         self.input = self.output = None
+        self.random = seed  # the random generator
+        self.values = {}    # name -> array, every value of the last step
+        check(0 <= seed < 2**32, 'seed out of range')
         for line in lines:
             try:
                 self._line(lines, *line)
@@ -91,6 +97,11 @@ class Model:
             rows = list(islice(lines, args[0] if len(args) == 2 else 1))
             c = self.const[name] = np.array(rows, np.int64).reshape(args)
             return args, (int(c.min()), int(c.max()))
+        if op == 'rand':
+            n, b = args
+            check(n > 0 and b > 0, 'needs a size and a number of bits')
+            self.rand[name] = n, b
+            return (n,), (0, 2**b - 1)
         check(op in STEP, 'unknown operation')
         self.code.append((name, op, args))
         if op in ('row', 'matmul'):
@@ -105,9 +116,17 @@ class Model:
             neg = self.const[m].clip(max=0).sum(1).tolist()
             return shape[m][:1], (min(p * lo + n * hi for p, n in zip(pos, neg)),
                                   max(p * hi + n * lo for p, n in zip(pos, neg)))
+        if op == 'take':
+            t, a = args
+            check(len(shape[t]) == len(shape[a]) == 1, 'needs two vectors')
+            check(0 <= rng[a][0] and rng[a][1] < shape[t][0], 'index can leave the table')
+            return shape[a], rng[t]
         a, *rest = args
         lo, hi = rng[a]
         check(len(shape[a]) == 1, 'needs a vector')
+        if op == 'argmax':
+            check(not rest, 'takes one vector')
+            return (1,), (0, shape[a][0] - 1)
         if op == 'shr':
             k, = rest
             check(k >= 0, 'shift must not be negative')
@@ -125,9 +144,21 @@ class Model:
         ends = [x * y for x in rng[a] for y in rng[b]]
         return shape[a], (min(ends), max(ends))
 
+    def _random(self, n, b):
+        """n numbers of b bits each from the generator, which is xorshift32."""
+        numbers = []
+        for _ in range(n):
+            self.random ^= self.random << 13 & 0xFFFFFFFF
+            self.random ^= self.random >> 17
+            self.random ^= self.random << 5 & 0xFFFFFFFF
+            numbers.append(self.random >> 32 - b)
+        return np.array(numbers)
+
     def step(self, x):
         check(0 <= x <= self.range[self.input][1], 'input out of range')
-        v = {**self.const, **self.state, self.input: x}
+        v = self.values = {**self.const, **self.state, self.input: x}
+        for name, (n, b) in self.rand.items():
+            v[name] = self._random(n, b)
         for name, op, args in self.code:
             v[name] = STEP[op](v, *args)
         self.state = {h: v[a] for h, a in self.next.items()}
@@ -135,6 +166,6 @@ class Model:
 
 
 if __name__ == '__main__':
-    model = Model(open(sys.argv[1]).read())
+    model = Model(open(sys.argv[1]).read(), *map(int, sys.argv[2:]))
     for x in sys.stdin.buffer.read():
         print(*model.step(x))
