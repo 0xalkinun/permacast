@@ -83,15 +83,17 @@ def random_model(rng, out=None):
     if out == 'pick':  # every output must be a valid input
         i = max(i, m)
 
-    def const(name, *shape):
-        high = int(rng.choice([1, 9, 100]))
+    def const(name, *shape, high=None):
+        high = high or int(rng.choice([1, 9, 100]))
         rows = rng.integers(-high, high + 1, shape).reshape(-1, shape[-1]).tolist()
         return [f'const {name} ' + ' '.join(map(str, shape))] + [' '.join(map(str, r)) for r in rows]
 
+    weights = int(rng.choice([1, 3, 9, 100]))  # the matrices for matmul share a range
     return '\n'.join([
         'permacast 0', f'in x {i}', f'state h {n} -100 100', f'state o {m} -9 9',
-        *const('E', i, m), *const('W', n, m), *const('U', n, n), *const('b', n), *const('V', m, n),
-        *const('T', 8), f'rand dice {m} 3', f'rand coin {n} 1',  # coin is never read, but still drawn
+        *const('E', i, m), *const('W', n, m, high=weights), *const('U', n, n, high=weights),
+        *const('b', n), *const('V', m, n, high=weights), *const('T', 8),
+        f'rand dice {m} 3', f'rand coin {n} 1',  # coin is never read, but still drawn
         'row e E x', 'matmul p W e', 'matmul q U h', 'add s p q', 'mul t s b', 'shr u t 3',
         'sub v u h', 'clamp w v -100 100', 'next h w', 'matmul y V w', 'take luck T dice',
         'add lucky y luck', 'argmax pick lucky', 'mul z lucky o', 'shr f z 2', 'clamp c f -9 9',
