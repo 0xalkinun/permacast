@@ -101,15 +101,15 @@ def compile(m, matrix=1, vector=None):
     A = max([width[y] for y, op, _ in m.code if op == 'matmul'] + [1])  # the widest sum
     X = index(m.range[m.input][1] + 1)
     K = index(max([depth[n] for n in layout if layout[n] in ('row', 'matmul')] + [1]))
-    J1 = f'j1[{lv - 1}:0]' if lv else '0'  # the vector lane of column j1
-    JP = 'jp' if lv else '0'              # the vector lane before that of column j
+    J2 = f'j2[{lv - 1}:0]' if lv else '0'  # the vector lane of column j2
+    JP = 'jp' if lv else '0'              # the vector lane two before that of column j
 
-    def lane(n, p, word='d'):
-        """Element p of word d from memory n, or of q, or of the vector n the lane computes."""
+    def lane(n, p):
+        """Element p of word d from memory n, or of the vector n the lane computes."""
         if n in inline:
             return f'v_{n}'
         w = width[n]
-        return f'{word}_{n}' if layout[n] == 'table' else f'$signed({word}_{n}[{p}*{w} +: {w}])'
+        return f'd_{n}' if layout[n] == 'table' else f'$signed(d_{n}[{p}*{w} +: {w}])'
 
     # Each operation of the circuit: (comment, destination, rows, columns, columns
     # of the last row, what it reads, the result of vector lane p, the column of
@@ -147,16 +147,16 @@ def compile(m, matrix=1, vector=None):
             operation(comment, y, rows, 1, f"base = x[{X - 1}:0] * {K}'d{rows}; ", lane(a, 'p'))
         elif op == 'matmul':  # each row of matrix lanes sums its columns, then fills up to S words
             cols, groups = size[rest[0]], words(size[y], L)
-            read = f'a = j >> {lv}; t = {lane(rest[0], J1, "q")}; w = q_{a}; '
+            read = f'a = j >> {lv}; t = {lane(rest[0], J2)}; w = d_{a}; '
             operation(comment, y, groups, cols + S - 1, read, f'$signed(full[p*{A} +: {A}])',
-                      cols + rows - (groups - 1) * S - 1, cols - 1)
-        elif op == 'take':  # in each row, read the word of indices, then the table once per lane
+                      cols + rows - (groups - 1) * S - 1, cols - 1, 1)
+        elif op == 'take':  # in each row, read the word of indices, then from d the table once per lane
             b, n = rest[0], size[y]
-            read = f'ta = q_{b}[{JP}*{width[b]} +: {min(width[b], index(size[a]))}]; '
-            operation(comment, y, rows, V + 1, read, f'j2 == p + 1 ? {lane(a, "p")} : acc', n - (rows - 1) * V + 1)
+            read = f'ta = d_{b}[{JP}*{width[b]} +: {min(width[b], index(size[a]))}]; '
+            operation(comment, y, rows, V + 2, read, f'j2 == p + 2 ? {lane(a, "p")} : acc', n - (rows - 1) * V + 2)
         elif op == 'argmax':  # acc holds the index of the largest element so far
-            read, result = f'a = j >> {lv}; t = {lane(a, J1, "q")}; ', f'j2 == 0 || t2 > best ? j2[{index(size[a]) - 1}:0] : acc'
-            operation(comment, y, 1, size[a], read, result)
+            read, result = f'a = j >> {lv}; t = {lane(a, J2)}; ', f'zero3 || t3 > best ? j3[{index(size[a]) - 1}:0] : acc'
+            operation(comment, y, 1, size[a], read, result, late=1)
         else:  # on vectors as late as the latest it reads
             k = max(late.get(n, 0) for n in [a, *rest])
             if op == 'shr':
@@ -174,7 +174,7 @@ def compile(m, matrix=1, vector=None):
             else:
                 operation(comment, y, rows, 1, '', result, late=k)
     emit = len(ops)
-    operation(f'out {m.output}', None, 1, size[m.output], f'a = j >> {lv}; t = {lane(m.output, J1, "q")}; ')
+    operation(f'out {m.output}', None, 1, size[m.output], f'a = j >> {lv}; t = {lane(m.output, J2)}; ', late=1)
     for h, a in m.next.items():
         operation(f'next {h} {a}', h, words(size[h]), 1, '', lane(a, 'p'))
     N = index(max([o[2] for o in ops] + [o[3] for o in ops] + list(depth.values()) + [V + 1]))
@@ -199,10 +199,10 @@ def compile(m, matrix=1, vector=None):
         cases.append(f"            {i}: begin imax = {N}'d{rows - 1}; jmax = {jmax}; {read}end  // {comment}")
         if result != '0':
             results.append(f'                {i}: r = {result};')
-    # A weight of up to three bits multiplies by adding t2 shifted by each of its
+    # A weight of up to three bits multiplies by adding t3 shifted by each of its
     # bits, the top one negative, so that the matrix lanes need no multipliers.
-    shifted = [f"(w2[p*{M} + {b}] ? t2{f' <<< {b}' if b else ''} : {A}'sd0)" for b in range(M)]
-    product = (f'$signed(w2[p*{M} +: {M}]) * t2' if M > 3 else
+    shifted = [f"(w3[p*{M} + {b}] ? t3{f' <<< {b}' if b else ''} : {A}'sd0)" for b in range(M)]
+    product = (f'$signed(w3[p*{M} +: {M}]) * t3' if M > 3 else
                ' + '.join(shifted[:-1] or [f"{A}'sd0"]) + f' - {shifted[-1]}')
     nl = '\n'
     verilog = f'''\
@@ -222,25 +222,27 @@ module permacast (
 
     // op: the operation in progress. i, j: the row and column being read.
     // k: the position in a matrix. run: a column is being read. v[s]: what was
-    // read s ticks ago is on its way: in q at stage 1, and in d, t2 and w2 at
-    // stage 2. put[s]: it is to be stored. j1, j2, last1, last2: its column, and
-    // that it is the last, at stages 1 and 2. o: the words stored so far. best:
-    // the largest element so far. g: the random generator, gn its next value.
+    // read s ticks ago is on its way: in q at stage 1, in d at stage 2, and in t3
+    // and w3 at stage 3. put[s]: it is to be stored. last[s]: it is the last
+    // column. j1, j2, j3: its column, at stages 1 to 3. zero3: column 0 is at
+    // stage 3. keep3: the sums kept in accs are being stored. o: the words stored
+    // so far. best: the largest element so far. g: the random generator, gn its
+    // next value.
     reg [{index(len(ops)) - 1}:0] op;
-    reg [{N - 1}:0] i, j, j1, j2, o;
+    reg [{N - 1}:0] i, j, j1, j2, j3, o;
     reg [{K - 1}:0] k;
-    reg [{T}:1] v, put;
-    reg run, last1, last2;
+    reg [{T}:1] v, put, last;
+    reg run, zero3, keep3;
     integer s;
-    reg signed [{W - 1}:0] best, t2;
-    reg [{L * M - 1}:0] w2;
+    reg signed [{W - 1}:0] best, t3;
+    reg [{L * M - 1}:0] w3;
     reg [31:0] g;
     wire [31:0] g1 = g ^ (g << 13), g2 = g1 ^ (g1 >> 17), gn = g2 ^ (g2 << 5);
-{f"    wire [{lv - 1}:0] jp = j[{lv - 1}:0] - 1'b1;{nl}" if lv else ""}
+{f"    wire [{lv - 1}:0] jp = j[{lv - 1}:0] - 2'd2;{nl}" if lv else ""}
     // Each operation: its last row and column, the column jend of the last
     // product of a matrix, the ticks deep by which its results lag stage 2, the
-    // word a and table entry ta it reads, the first word base of its matrix, t,
-    // an element it reads, and w, the word of its matrix for matmul.
+    // word a and table entry ta it reads, the first word base of its matrix, and
+    // from d, t, an element it reads, and w, the word of its matrix for matmul.
     reg [{N - 1}:0] imax, jmax, jend, deep, a, ta;
     reg [{K - 1}:0] base;
     reg signed [{W - 1}:0] t;
@@ -256,17 +258,17 @@ module permacast (
 {nl.join(reads)}
     end
 
-    // The matrix lanes. Each adds the product of its weight and t2 to its sum
+    // The matrix lanes. Each adds the product of its weight and t3 to its sum
     // in sums, which begins again at column 0. full holds the sums being
     // stored: those just made, then those kept in accs, which moves down a word
     // as each word is stored.
     reg [{L * A - 1}:0] accs;
-    wire [{L * A - 1}:0] sums, full = j2 <= jend ? sums : accs;
+    wire [{L * A - 1}:0] sums, full = keep3 ? accs : sums;
     genvar p;
     generate for (p = 0; p < {L}; p = p + 1) begin : mac
-        assign sums[p*{A} +: {A}] = (j2 == 0 ? {A}'sd0 : $signed(accs[p*{A} +: {A}])) + {product};
+        assign sums[p*{A} +: {A}] = (zero3 ? {A}'sd0 : $signed(accs[p*{A} +: {A}])) + {product};
     end endgenerate
-    always @(posedge clk) if (v[2]) accs <= put[2] ? full >> {V * A} : full;
+    always @(posedge clk) if (v[3]) accs <= put[3] ? full >> {V * A} : full;
 
     // Each vector lane: its result r, acc, its result so far in the row, and
     // the vectors it computes where they are read, with the registers that
@@ -280,21 +282,22 @@ module permacast (
 {nl.join(results)}
             endcase
         end
-        always @(posedge clk) acc <= v[2] && !last2 ? r : 0;
+        always @(posedge clk) acc <= v[2 + deep] && !last[2 + deep] ? r : 0;
 {nl.join(packs)}
     end endgenerate
 
     always @(posedge clk) begin
-        v[1] <= run; put[1] <= run && (j == jmax || j >= jend);
+        v[1] <= run; put[1] <= run && (j == jmax || j >= jend); last[1] <= run && j == jmax;
         for (s = 2; s <= {T}; s = s + 1) begin  // only as far as the stage of the results of op
             v[s] <= s <= 2 + deep && v[s - 1]; put[s] <= s <= 2 + deep && put[s - 1];
+            last[s] <= s <= 2 + deep && last[s - 1];
         end
-        last1 <= run && j == jmax; last2 <= last1; j1 <= j; j2 <= j1; t2 <= t; w2 <= w;
+        j1 <= j; j2 <= j1; j3 <= j2; zero3 <= j2 == 0; keep3 <= j2 > jend; t3 <= t; w3 <= w;
         if (put[2 + deep]) o <= o + 1;
-        best <= j2 == 0 || t2 > best ? t2 : best;
+        best <= zero3 || t3 > best ? t3 : best;
         if (v[2] && ({draws})) g <= gn;
         if (rst) begin
-            op <= 0; run <= 0; v <= 0; put <= 0; last1 <= 0; last2 <= 0; g <= seed;
+            op <= 0; run <= 0; v <= 0; put <= 0; last <= 0; g <= seed;
         end else if (run) begin  // read a column
             if (j <= jend) k <= k + 1;
             j <= j == jmax ? 0 : j + 1;
@@ -307,8 +310,8 @@ module permacast (
     end
 
     assign ready = op == {first} && !run && v == 0;
-    assign valid = v[2] && op == {emit};
-    assign y = t2;
+    assign valid = v[3] && op == {emit};
+    assign y = t3;
 endmodule
 '''
     files = {'permacast.v': verilog}
