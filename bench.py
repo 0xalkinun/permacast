@@ -35,11 +35,12 @@ ROOT = Path(__file__).parent
 STEPS = 10000  # steps timed on the CPU
 STREAMS = 1024  # streams run side by side on the GPU
 BUILDS = 6  # chips built at once, each of which can take a few gigabytes of memory
+ROUTE = 3600  # seconds given to place and route, which may never finish on a crowded chip
 
 
-def run(*command, cwd=None):
+def run(*command, cwd=None, timeout=None):
     """Run a tool and return everything it prints."""
-    return subprocess.run(command, cwd=cwd, check=True, text=True,
+    return subprocess.run(command, cwd=cwd, check=True, text=True, timeout=timeout,
                           stdout=subprocess.PIPE, stderr=subprocess.STDOUT).stdout
 
 
@@ -101,7 +102,10 @@ def measure_chip(path, lanes):
         run('yosys', '-q', '-p', 'read_verilog permacast.v; synth_ecp5 -top permacast -json synth.json', cwd=tmp)
         try:
             run('nextpnr-ecp5', '--85k', '--package', 'CABGA381', '--json', 'synth.json', '--seed', '1',
-                '--lpf-allow-unconstrained', '--timing-allow-fail', '--report', 'report.json', cwd=tmp)
+                '--lpf-allow-unconstrained', '--timing-allow-fail', '--report', 'report.json', cwd=tmp,
+                timeout=ROUTE)
+        except subprocess.TimeoutExpired:
+            return [path.stem, lanes, f'{ticks:,}', f'does not route in {ROUTE // 60} minutes']
         except subprocess.CalledProcessError as e:
             if 'no BELs remaining' not in e.stdout:
                 raise
