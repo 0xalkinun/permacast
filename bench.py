@@ -122,7 +122,7 @@ def table(columns, rows):
 
 
 def paragraph(text, indent=''):
-    return textwrap.fill(text, 79, subsequent_indent=indent) + '\n'
+    return textwrap.fill(text, 79, subsequent_indent=indent, break_on_hyphens=False) + '\n'
 
 
 if __name__ == '__main__':
