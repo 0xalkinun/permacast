@@ -96,7 +96,7 @@ def random_model(rng, out=None):
         f'rand dice {m} 3', f'rand coin {n} 1',  # coin is never read, but still drawn
         'row e E x', 'matmul p W e', 'matmul q U h', 'add s p q', 'mul t s b', 'shr u t 3',
         'sub v u h', 'clamp w v -100 100', 'next h w', 'matmul y V w', 'take luck T dice',
-        'add lucky y luck', 'argmax pick lucky', 'mul z lucky o', 'shr f z 2', 'clamp c f -9 9',
+        'add lucky y luck', 'argmax pick luck', 'mul z lucky o', 'shr f z 2', 'clamp c f -9 9',
         'next o c', f'out {out or rng.choice(["lucky", "pick", "o", "e"])}',
     ]) + '\n', rng.integers(0, i, 20).tolist(), int(rng.integers(2**32))
 
