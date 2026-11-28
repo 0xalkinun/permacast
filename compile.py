@@ -83,10 +83,10 @@ def compile(m, lanes=1):
     J1 = f'j1[{lg - 1}:0]' if lg else '0'  # the lane of column j1
     JP = 'jp' if lg else '0'              # the lane before that of column j
 
-    def lane(n, p):
-        """Element p of the word read from memory n."""
+    def lane(n, p, word='d'):
+        """Element p of word d from memory n, or of q."""
         w = width[n]
-        return f'q_{n}' if layout[n] == 'table' else f'$signed(q_{n}[{p}*{w} +: {w}])'
+        return f'{word}_{n}' if layout[n] == 'table' else f'$signed({word}_{n}[{p}*{w} +: {w}])'
 
     # Each operation of the circuit: (comment, destination, rows, columns, columns
     # of the last row, what it reads, the result of lane p). It reads its columns
@@ -100,20 +100,20 @@ def compile(m, lanes=1):
         operation(f'clear {h}', h, words(size[h]), 1)
     first = len(ops)
     for y, (n, b) in m.rand.items():
-        operation(f'rand {y} {n} {b}', y, words(n), L, '', f'j1 == p ? gn[31:{32 - b}] : acc', n - (words(n) - 1) * L)
+        operation(f'rand {y} {n} {b}', y, words(n), L, '', f'j2 == p ? gn[31:{32 - b}] : acc', n - (words(n) - 1) * L)
     draws = ' || '.join(f'op == {i}' for i in range(first, len(ops))) or '0'
     for y, op, (a, *rest) in m.code:
         comment, rows = ' '.join(map(str, (op, y, a, *rest))), words(size[y])
         if op == 'row':
             operation(comment, y, rows, 1, f"base = x[{X - 1}:0] * {K}'d{rows}; ", lane(a, 'p'))
         elif op == 'matmul':
-            operation(comment, y, rows, size[rest[0]], f'a = j >> {lg}; t = {lane(rest[0], J1)}; ', f'acc + {lane(a, "p")} * t')
+            operation(comment, y, rows, size[rest[0]], f'a = j >> {lg}; t = {lane(rest[0], J1, "q")}; ', f'acc + {lane(a, "p")} * t2')
         elif op == 'take':  # in each row, read the word of indices, then the table once per lane
             b, n = rest[0], size[y]
             read = f'ta = q_{b}[{JP}*{width[b]} +: {min(width[b], index(size[a]))}]; '
-            operation(comment, y, rows, L + 1, read, f'j1 == p + 1 ? q_{a} : acc', n - (rows - 1) * L + 1)
+            operation(comment, y, rows, L + 1, read, f'j2 == p + 1 ? {lane(a, "p")} : acc', n - (rows - 1) * L + 1)
         elif op == 'argmax':  # acc holds the index of the largest element so far
-            read, result = f'a = j >> {lg}; t = {lane(a, J1)}; ', f'j1 == 0 || t > best ? j1[{index(size[a]) - 1}:0] : acc'
+            read, result = f'a = j >> {lg}; t = {lane(a, J1, "q")}; ', f'j2 == 0 || t2 > best ? j2[{index(size[a]) - 1}:0] : acc'
             operation(comment, y, 1, size[a], read, result)
         elif op == 'shr':
             operation(comment, y, rows, 1, '', f'{lane(a, "p")} >>> {rest[0]}')
@@ -124,7 +124,7 @@ def compile(m, lanes=1):
         else:
             operation(comment, y, rows, 1, '', f'{lane(a, "p")} {SIGN[op]} {lane(rest[0], "p")}')
     emit = len(ops)
-    operation(f'out {m.output}', None, 1, size[m.output], f'a = j >> {lg}; t = {lane(m.output, J1)}; ')
+    operation(f'out {m.output}', None, 1, size[m.output], f'a = j >> {lg}; t = {lane(m.output, J1, "q")}; ')
     for h, a in m.next.items():
         operation(f'next {h} {a}', h, words(size[h]), 1, '', lane(a, 'p'))
     N = index(max([o[2] for o in ops] + [o[3] for o in ops] + list(depth.values()) + [L + 1]))
@@ -133,13 +133,13 @@ def compile(m, lanes=1):
     for n, how in layout.items():
         w, at = width[n], {'table': 'ta', 'vector': 'a', 'matmul': 'k', 'row': 'k'}[how]
         word = f'signed [{w - 1}:0]' if how == 'table' else f'[{L * w - 1}:0]'
-        memories.append(f'    reg {word} m_{n} [0:{depth[n] - 1}], q_{n};')
+        memories.append(f'    reg {word} m_{n} [0:{depth[n] - 1}], q_{n}, d_{n};')
         if n in const:
             memories.append(f'    initial $readmemh("{n}.hex", m_{n});')
-        reads.append(f'        q_{n} <= m_{n}[{at}[{index(depth[n]) - 1}:0]];')
+        reads.append(f'        q_{n} <= m_{n}[{at}[{index(depth[n]) - 1}:0]]; d_{n} <= q_{n};')
         writers = ' || '.join(f'op == {i}' for i, o in enumerate(ops) if o[1] == n)
         if writers:
-            reads.append(f'        if (last1 && ({writers})) m_{n}[i1[{index(depth[n]) - 1}:0]] <= r_{n};')
+            reads.append(f'        if (last2 && ({writers})) m_{n}[i2[{index(depth[n]) - 1}:0]] <= r_{n};')
             wires.append(f'    wire [{L * w - 1}:0] r_{n};')
             packs.append(f'        assign r_{n}[p*{w} +: {w}] = r[{w - 1}:0];')
     for i, (comment, _, rows, cols, last, read, result) in enumerate(ops):
@@ -159,19 +159,20 @@ module permacast (
     output ready, valid,
     output signed [31:0] y
 );
-    // A memory m and its read register q for every constant and vector.
+    // A memory m for every constant and vector, its read register q, and d,
+    // which holds what q held a tick before.
 {nl.join(memories)}
 
     // op: the operation in progress. i, j: the row and column being read.
     // k: the position in a matrix. run: a column is being read. v1: q holds
     // what was read, for row i1 and column j1. last1: it is the last column.
-    // best: the largest element so far. g: the random generator, gn its next
-    // value.
+    // v2, i2, j2, last2: the same a tick later, for d and t2. best: the
+    // largest element so far. g: the random generator, gn its next value.
     reg [{index(len(ops)) - 1}:0] op;
-    reg [{N - 1}:0] i, j, i1, j1;
+    reg [{N - 1}:0] i, j, i1, j1, i2, j2;
     reg [{K - 1}:0] k;
-    reg run, v1, last1;
-    reg signed [{W - 1}:0] best;
+    reg run, v1, last1, v2, last2;
+    reg signed [{W - 1}:0] best, t2;
     reg [31:0] g;
     wire [31:0] g1 = g ^ (g << 13), g2 = g1 ^ (g1 >> 17), gn = g2 ^ (g2 << 5);
 {f"    wire [{lg - 1}:0] jp = j[{lg - 1}:0] - 1'b1;{nl}" if lg else ""}
@@ -202,30 +203,31 @@ module permacast (
 {nl.join(results)}
             endcase
         end
-        always @(posedge clk) acc <= v1 && !last1 ? r : 0;
+        always @(posedge clk) acc <= v2 && !last2 ? r : 0;
 {nl.join(packs)}
     end endgenerate
 
     always @(posedge clk) begin
         v1 <= run; last1 <= run && j == jmax; i1 <= i; j1 <= j;
-        best <= j1 == 0 || t > best ? t : best;
-        if (v1 && ({draws})) g <= gn;
+        v2 <= v1; last2 <= last1; i2 <= i1; j2 <= j1; t2 <= t;
+        best <= j2 == 0 || t2 > best ? t2 : best;
+        if (v2 && ({draws})) g <= gn;
         if (rst) begin
-            op <= 0; run <= 0; v1 <= 0; last1 <= 0; g <= seed;
+            op <= 0; run <= 0; v1 <= 0; last1 <= 0; v2 <= 0; last2 <= 0; g <= seed;
         end else if (run) begin  // read a column
             k <= k + 1;
             j <= j == jmax ? 0 : j + 1;
             if (j == jmax) begin i <= i + 1; run <= i != imax; end
-        end else if (v1)  // the last result is being stored
+        end else if (v2 && !v1)  // the last result is being stored
             op <= op == {len(ops) - 1} ? {first} : op + 1;
-        else if (op != {first} || start) begin  // begin the operation
+        else if (!v1 && (op != {first} || start)) begin  // begin the operation
             i <= 0; j <= 0; k <= base; run <= 1;
         end
     end
 
-    assign ready = op == {first} && !run && !v1;
-    assign valid = v1 && op == {emit};
-    assign y = t;
+    assign ready = op == {first} && !run && !v1 && !v2;
+    assign valid = v2 && op == {emit};
+    assign y = t2;
 endmodule
 '''
     files = {'permacast.v': verilog}
