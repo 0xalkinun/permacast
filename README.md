@@ -95,7 +95,7 @@ chip write, and checks every byte against the reference:
 
 ## Bench
 
-    python bench.py model.pc --lanes 1 32 128 --valid data/stories-valid.txt
+    python bench.py model.pc --lanes 1 32 256 --valid data/stories-valid.txt
 
 This scores the model on held-out text and times both baselines on it. For each
 number of matrix lanes it checks the compiled circuit against the reference,
