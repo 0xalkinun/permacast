@@ -67,7 +67,7 @@ the bytes of any file, and compare with the reference:
 
     python compile.py model.pc out 8
     cd out
-    verilator --binary -Wno-WIDTHEXPAND --top tb ../tb.v permacast.v \
+    verilator --binary -Wno-WIDTH --top tb ../tb.v permacast.v \
         --Mdir obj -o sim
     ./obj/sim +in=input +out=output
     python ../ref.py ../model.pc < input | cmp - output
@@ -75,7 +75,7 @@ the bytes of any file, and compare with the reference:
 To simulate the whole chip writing 300 bytes on its own, through its serial
 port, in the same folder:
 
-    verilator --binary -Wno-WIDTHEXPAND --top chip_tb ../chip_tb.v ../chip.v \
+    verilator --binary -Wno-WIDTH --top chip_tb ../chip_tb.v ../chip.v \
         permacast.v --Mdir obj_chip -o sim
     ./obj_chip/sim +seed=1 +loop=300 +out=story
 

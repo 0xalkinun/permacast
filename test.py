@@ -68,7 +68,7 @@ def simulate(text, bench, data=(), lanes=1, **settings):
         Path(tmp, 'in').write_bytes(bytes(data))
         for command in (
             [sys.executable, ROOT / 'compile.py', 'model.pc', '.', str(lanes)],
-            ['verilator', '--binary', '-Wno-WIDTHEXPAND', '-j', '0', '--top', bench[0][:-2],
+            ['verilator', '--binary', '-Wno-WIDTH', '-j', '0', '--top', bench[0][:-2],
              *(ROOT / f for f in bench), 'permacast.v', '--Mdir', 'obj', '-o', 'sim'],
             ['./obj/sim', '+in=in', '+out=out', *(f'+{k}={v}' for k, v in settings.items())],
         ):

@@ -95,7 +95,7 @@ def measure_chip(path, lanes):
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, 'in').write_bytes(data)
         run(sys.executable, ROOT / 'compile.py', path.resolve(), '.', str(lanes), cwd=tmp)
-        run('verilator', '--binary', '-Wno-WIDTHEXPAND', '-j', '0', '--top', 'tb', ROOT / 'tb.v',
+        run('verilator', '--binary', '-Wno-WIDTH', '-j', '0', '--top', 'tb', ROOT / 'tb.v',
             'permacast.v', '--Mdir', 'obj', '-o', 'sim', cwd=tmp)
         ticks = int(run('./obj/sim', '+in=in', '+out=out', cwd=tmp).split()[0])
         assert Path(tmp, 'out').read_text() == outputs(text, data), f'{path}: the chip differs from the reference'

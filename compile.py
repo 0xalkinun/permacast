@@ -4,7 +4,10 @@ python compile.py model.pc out [lanes]    writes the circuit into the folder out
 
 The circuit keeps every constant in a read-only memory and every vector in a
 memory of its own, each as wide as the bounds of its values require. It runs
-the operations of the model in order.
+the operations of the model in order. A vector that only elementwise
+operations make and read has no memory or operation of its own: each lane
+computes it in registers, one operation a tick, while the operation that
+reads it reads the same word.
 
 Its lanes, a power of two, work side by side: a word of memory holds one
 element for each lane. A matrix product takes one clock tick per weight in a
@@ -21,6 +24,7 @@ import numpy as np
 from ref import Model
 
 SIGN = {'add': '+', 'sub': '-', 'mul': '*'}
+ELEMENTWISE = ('add', 'sub', 'mul', 'shr', 'clamp')
 
 
 def bits(lo, hi):
@@ -42,6 +46,13 @@ def compile(m, lanes=1):
     def words(n):
         return -(-n // L)
 
+    # A vector that an elementwise operation makes, and only elementwise
+    # operations read, has no memory: each lane computes it where it is read.
+    inline = {y for y, op, _ in m.code if op in ELEMENTWISE} - {*m.state, *m.next.values(), m.output}
+    for y, op, args in m.code:
+        if op not in ELEMENTWISE:
+            inline -= set(args)
+
     # How each memory is laid out. A vector holds its elements i*L to i*L + L - 1
     # in word i. A matrix for matmul holds column j of rows g*L to g*L + L - 1 in
     # word g*cols + j. A matrix for row holds each row in words of its own. A
@@ -57,7 +68,8 @@ def compile(m, lanes=1):
         if op in ('row', 'matmul', 'take'):
             use(names.pop(0), {'row': 'row', 'matmul': 'matmul', 'take': 'table'}[op])
         for n in names + [y]:
-            use(n, 'vector')
+            if n not in inline:
+                use(n, 'vector')
     for n in [*m.state, *m.next.values(), *m.rand, m.output]:
         use(n, 'vector')
 
@@ -76,22 +88,24 @@ def compile(m, lanes=1):
 
     const = {n: contents(n) for n in layout if n in m.const}
     depth = {n: len(const[n]) if n in const else words(size[n]) for n in layout}
-    width = {n: bits(*m.range[n]) for n in layout}
-    W = max(width.values())  # the widest value
+    width = {n: bits(*m.range[n]) for n in m.range}
+    W = max(width[n] for n in layout)  # the widest value in memory
     X = index(m.range[m.input][1] + 1)
     K = index(max([depth[n] for n in layout if layout[n] in ('row', 'matmul')] + [1]))
     J1 = f'j1[{lg - 1}:0]' if lg else '0'  # the lane of column j1
     JP = 'jp' if lg else '0'              # the lane before that of column j
 
     def lane(n, p, word='d'):
-        """Element p of word d from memory n, or of q."""
+        """Element p of word d from memory n, or of q, or of the vector n the lane computes."""
+        if n in inline:
+            return f'v_{n}'
         w = width[n]
         return f'{word}_{n}' if layout[n] == 'table' else f'$signed({word}_{n}[{p}*{w} +: {w}])'
 
     # Each operation of the circuit: (comment, destination, rows, columns, columns
     # of the last row, what it reads, the result of lane p). It reads its columns
     # one tick each, then stores one word of results.
-    ops = []
+    ops, computed, ticks = [], [], {}  # the vectors each lane computes, and the ticks each takes
 
     def operation(comment, y, rows, cols, read='', result='0', last=None):
         ops.append((comment, y, rows, cols, last or cols, read, result))
@@ -115,14 +129,22 @@ def compile(m, lanes=1):
         elif op == 'argmax':  # acc holds the index of the largest element so far
             read, result = f'a = j >> {lg}; t = {lane(a, J1, "q")}; ', f'j2 == 0 || t2 > best ? j2[{index(size[a]) - 1}:0] : acc'
             operation(comment, y, 1, size[a], read, result)
-        elif op == 'shr':
-            operation(comment, y, rows, 1, '', f'{lane(a, "p")} >>> {rest[0]}')
-        elif op == 'clamp':  # limits outside the bounds of a never apply
-            lo, hi = (f"{'-' if v < 0 else ''}{W}'sd{abs(v)}"
-                      for v in (max(rest[0], m.range[a][0]), min(rest[1], m.range[a][1])))
-            operation(comment, y, rows, 1, '', f'{lane(a, "p")} < {lo} ? {lo} : {lane(a, "p")} > {hi} ? {hi} : {lane(a, "p")}')
         else:
-            operation(comment, y, rows, 1, '', f'{lane(a, "p")} {SIGN[op]} {lane(rest[0], "p")}')
+            if op == 'shr':
+                result = f'{lane(a, "p")} >>> {rest[0]}'
+            elif op == 'clamp':  # limits outside the bounds of a never apply
+                w = width[a]
+                lo, hi = (f"{w}'sh{v & (1 << w) - 1:x}"
+                          for v in (max(rest[0], m.range[a][0]), min(rest[1], m.range[a][1])))
+                result = f'{lane(a, "p")} < {lo} ? {lo} : {lane(a, "p")} > {hi} ? {hi} : {lane(a, "p")}'
+            else:
+                result = f'{lane(a, "p")} {SIGN[op]} {lane(rest[0], "p")}'
+            wait = max(ticks.get(n, 0) for n in [a, *rest])  # for the vectors it reads to settle
+            if y in inline:  # a register, a tick behind what it reads
+                ticks[y] = wait + 1
+                computed.append(f'        reg signed [{width[y] - 1}:0] v_{y}; always @(posedge clk) v_{y} <= {result};')
+            else:  # it reads the same word until then
+                operation(comment, y, rows, wait + 1, '', result)
     emit = len(ops)
     operation(f'out {m.output}', None, 1, size[m.output], f'a = j >> {lg}; t = {lane(m.output, J1, "q")}; ')
     for h, a in m.next.items():
@@ -192,12 +214,13 @@ module permacast (
 {nl.join(reads)}
     end
 
-    // Each lane: its result r, and acc, its result so far in the row.
+    // Each lane: its result r, acc, its result so far in the row, and the
+    // vectors it computes where they are read.
 {nl.join(wires)}
     genvar p;
     generate for (p = 0; p < {L}; p = p + 1) begin : lane
         reg signed [{W - 1}:0] acc, r;
-        always @* begin
+{f"{nl.join(computed)}{nl}" if computed else ""}        always @* begin
             r = 0;
             case (op)
 {nl.join(results)}
