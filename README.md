@@ -84,9 +84,10 @@ The file story holds the seed the chip took, then the bytes it wrote.
 
 ## Run on a board
 
-[boards](boards) puts the chip on a Sipeed Tang Mega 138K Dock, though it has
-not been tried on a board yet. Once the board is loaded, this lets the chip
-write, and checks every byte against the reference:
+[boards](boards) puts the chip on a Sipeed Tang Mega 138K Dock, built with
+open tools as [tang-mega-138k.v](boards/tang-mega-138k.v) describes, though it
+has not been tried on a board yet. Once the board is loaded, this lets the
+chip write, and checks every byte against the reference:
 
     python host.py /dev/ttyUSB1 model.pc
 
