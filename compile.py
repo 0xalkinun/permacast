@@ -6,8 +6,8 @@ The circuit keeps every constant in a read-only memory and every vector in a
 memory of its own, each as wide as the bounds of its values require. It runs
 the operations of the model in order. A vector that only elementwise
 operations make and read has no memory or operation of its own: each vector
-lane computes it in registers, one operation a tick, while the operation that
-reads it reads the same word.
+lane computes it in a pipeline of registers, one operation a tick, and the
+operation that reads it stores its results as many ticks later.
 
 Its lanes work side by side, in two kinds, each a power of two. Matrix lanes
 only multiply and add: each sums a row of a matrix product, a weight a tick,
@@ -113,13 +113,27 @@ def compile(m, matrix=1, vector=None):
 
     # Each operation of the circuit: (comment, destination, rows, columns, columns
     # of the last row, what it reads, the result of vector lane p, the column of
-    # the last product of a matrix). It reads its columns one tick each, then
-    # stores one word of results, or for a matrix one word a tick from the column
-    # of its last product.
-    ops, computed, ticks = [], [], {}  # the vectors each lane computes, and the ticks each takes
+    # the last product of a matrix, the ticks by which its results lag). It reads
+    # its columns one tick each, then stores one word of results, or for a matrix
+    # one word a tick from the column of its last product.
+    ops = []
 
-    def operation(comment, y, rows, cols, read='', result='0', last=None, end=None):
-        ops.append((comment, y, rows, cols, last or cols, read, result, end))
+    def operation(comment, y, rows, cols, read='', result='0', last=None, end=None, late=0):
+        ops.append((comment, y, rows, cols, last or cols, read, result, end, late))
+
+    # The vectors each vector lane computes, each in a register some ticks behind
+    # the reads from memory, and the registers that delay a vector to meet one
+    # that is later.
+    computed, late, delayed = [], {}, set()
+
+    def at(n, k):
+        """Vector n in vector lane p, k ticks behind the reads from memory."""
+        if k == late.get(n, 0):
+            return lane(n, 'p')
+        if (n, k) not in delayed:
+            delayed.add((n, k))
+            computed.append(f'        reg signed [{width[n] - 1}:0] l{k}_{n}; always @(posedge clk) l{k}_{n} <= {at(n, k - 1)};')
+        return f'l{k}_{n}'
 
     for h in m.state:
         operation(f'clear {h}', h, words(size[h]), 1)
@@ -143,22 +157,22 @@ def compile(m, matrix=1, vector=None):
         elif op == 'argmax':  # acc holds the index of the largest element so far
             read, result = f'a = j >> {lv}; t = {lane(a, J1, "q")}; ', f'j2 == 0 || t2 > best ? j2[{index(size[a]) - 1}:0] : acc'
             operation(comment, y, 1, size[a], read, result)
-        else:
+        else:  # on vectors as late as the latest it reads
+            k = max(late.get(n, 0) for n in [a, *rest])
             if op == 'shr':
-                result = f'{lane(a, "p")} >>> {rest[0]}'
+                result = f'{at(a, k)} >>> {rest[0]}'
             elif op == 'clamp':  # limits outside the bounds of a never apply
-                w = width[a]
+                w, e = width[a], at(a, k)
                 lo, hi = (f"{w}'sh{v & (1 << w) - 1:x}"
                           for v in (max(rest[0], m.range[a][0]), min(rest[1], m.range[a][1])))
-                result = f'{lane(a, "p")} < {lo} ? {lo} : {lane(a, "p")} > {hi} ? {hi} : {lane(a, "p")}'
+                result = f'{e} < {lo} ? {lo} : {e} > {hi} ? {hi} : {e}'
             else:
-                result = f'{lane(a, "p")} {SIGN[op]} {lane(rest[0], "p")}'
-            wait = max(ticks.get(n, 0) for n in [a, *rest])  # for the vectors it reads to settle
-            if y in inline:  # a register, a tick behind what it reads
-                ticks[y] = wait + 1
+                result = f'{at(a, k)} {SIGN[op]} {at(rest[0], k)}'
+            if y in inline:  # a register, a tick later
+                late[y] = k + 1
                 computed.append(f'        reg signed [{width[y] - 1}:0] v_{y}; always @(posedge clk) v_{y} <= {result};')
-            else:  # it reads the same word until then
-                operation(comment, y, rows, wait + 1, '', result)
+            else:
+                operation(comment, y, rows, 1, '', result, late=k)
     emit = len(ops)
     operation(f'out {m.output}', None, 1, size[m.output], f'a = j >> {lv}; t = {lane(m.output, J1, "q")}; ')
     for h, a in m.next.items():
@@ -175,12 +189,13 @@ def compile(m, matrix=1, vector=None):
         reads.append(f'        q_{n} <= m_{n}[{at}[{index(depth[n]) - 1}:0]]; d_{n} <= q_{n};')
         writers = ' || '.join(f'op == {i}' for i, o in enumerate(ops) if o[1] == n)
         if writers:
-            reads.append(f'        if (store2 && ({writers})) m_{n}[o[{index(depth[n]) - 1}:0]] <= r_{n};')
+            reads.append(f'        if (put[2 + deep] && ({writers})) m_{n}[o[{index(depth[n]) - 1}:0]] <= r_{n};')
             wires.append(f'    wire [{V * w - 1}:0] r_{n};')
             packs.append(f'        assign r_{n}[p*{w} +: {w}] = r[{w - 1}:0];')
-    for i, (comment, _, rows, cols, last, read, result, end) in enumerate(ops):
+    T = 2 + max(o[8] for o in ops)  # the stage of the latest result
+    for i, (comment, _, rows, cols, last, read, result, end, lag) in enumerate(ops):
         jmax = f"{N}'d{cols - 1}" if last == cols else f"i == {N}'d{rows - 1} ? {N}'d{last - 1} : {N}'d{cols - 1}"
-        read += '' if end is None else f"jend = {N}'d{end}; "
+        read += ('' if end is None else f"jend = {N}'d{end}; ") + (f"deep = {N}'d{lag}; " if lag else '')
         cases.append(f"            {i}: begin imax = {N}'d{rows - 1}; jmax = {jmax}; {read}end  // {comment}")
         if result != '0':
             results.append(f'                {i}: r = {result};')
@@ -206,30 +221,32 @@ module permacast (
 {nl.join(memories)}
 
     // op: the operation in progress. i, j: the row and column being read.
-    // k: the position in a matrix. run: a column is being read. v1: q holds
-    // what was read, for column j1. last1: it is the last column. store1: a
-    // word is stored then. v2, j2, last2, store2: the same a tick later, for d,
-    // t2 and w2. o: the words stored so far. best: the largest element so far.
-    // g: the random generator, gn its next value.
+    // k: the position in a matrix. run: a column is being read. v[s]: what was
+    // read s ticks ago is on its way: in q at stage 1, and in d, t2 and w2 at
+    // stage 2. put[s]: it is to be stored. j1, j2, last1, last2: its column, and
+    // that it is the last, at stages 1 and 2. o: the words stored so far. best:
+    // the largest element so far. g: the random generator, gn its next value.
     reg [{index(len(ops)) - 1}:0] op;
     reg [{N - 1}:0] i, j, j1, j2, o;
     reg [{K - 1}:0] k;
-    reg run, v1, last1, store1, v2, last2, store2;
+    reg [{T}:1] v, put;
+    reg run, last1, last2;
+    integer s;
     reg signed [{W - 1}:0] best, t2;
     reg [{L * M - 1}:0] w2;
     reg [31:0] g;
     wire [31:0] g1 = g ^ (g << 13), g2 = g1 ^ (g1 >> 17), gn = g2 ^ (g2 << 5);
 {f"    wire [{lv - 1}:0] jp = j[{lv - 1}:0] - 1'b1;{nl}" if lv else ""}
     // Each operation: its last row and column, the column jend of the last
-    // product of a matrix, the word a and table entry ta it reads, the first
-    // word base of its matrix, t, an element it reads, and w, the word of its
-    // matrix for matmul.
-    reg [{N - 1}:0] imax, jmax, jend, a, ta;
+    // product of a matrix, the ticks deep by which its results lag stage 2, the
+    // word a and table entry ta it reads, the first word base of its matrix, t,
+    // an element it reads, and w, the word of its matrix for matmul.
+    reg [{N - 1}:0] imax, jmax, jend, deep, a, ta;
     reg [{K - 1}:0] base;
     reg signed [{W - 1}:0] t;
     reg [{L * M - 1}:0] w;
     always @* begin
-        imax = 0; jmax = 0; jend = ~{N}'d0; a = i; ta = 0; base = 0; t = 0; w = 0;
+        imax = 0; jmax = 0; jend = ~{N}'d0; deep = 0; a = i; ta = 0; base = 0; t = 0; w = 0;
         case (op)
 {nl.join(cases)}
         endcase
@@ -249,10 +266,11 @@ module permacast (
     generate for (p = 0; p < {L}; p = p + 1) begin : mac
         assign sums[p*{A} +: {A}] = (j2 == 0 ? {A}'sd0 : $signed(accs[p*{A} +: {A}])) + {product};
     end endgenerate
-    always @(posedge clk) if (v2) accs <= store2 ? full >> {V * A} : full;
+    always @(posedge clk) if (v[2]) accs <= put[2] ? full >> {V * A} : full;
 
     // Each vector lane: its result r, acc, its result so far in the row, and
-    // the vectors it computes where they are read.
+    // the vectors it computes where they are read, with the registers that
+    // delay them.
 {nl.join(wires)}
     generate for (p = 0; p < {V}; p = p + 1) begin : lane
         reg signed [{W - 1}:0] acc, r;
@@ -262,31 +280,34 @@ module permacast (
 {nl.join(results)}
             endcase
         end
-        always @(posedge clk) acc <= v2 && !last2 ? r : 0;
+        always @(posedge clk) acc <= v[2] && !last2 ? r : 0;
 {nl.join(packs)}
     end endgenerate
 
     always @(posedge clk) begin
-        v1 <= run; last1 <= run && j == jmax; store1 <= run && (j == jmax || j >= jend); j1 <= j;
-        v2 <= v1; last2 <= last1; store2 <= store1; j2 <= j1; t2 <= t; w2 <= w;
-        if (store2) o <= o + 1;
+        v[1] <= run; put[1] <= run && (j == jmax || j >= jend);
+        for (s = 2; s <= {T}; s = s + 1) begin  // only as far as the stage of the results of op
+            v[s] <= s <= 2 + deep && v[s - 1]; put[s] <= s <= 2 + deep && put[s - 1];
+        end
+        last1 <= run && j == jmax; last2 <= last1; j1 <= j; j2 <= j1; t2 <= t; w2 <= w;
+        if (put[2 + deep]) o <= o + 1;
         best <= j2 == 0 || t2 > best ? t2 : best;
-        if (v2 && ({draws})) g <= gn;
+        if (v[2] && ({draws})) g <= gn;
         if (rst) begin
-            op <= 0; run <= 0; v1 <= 0; last1 <= 0; store1 <= 0; v2 <= 0; last2 <= 0; store2 <= 0; g <= seed;
+            op <= 0; run <= 0; v <= 0; put <= 0; last1 <= 0; last2 <= 0; g <= seed;
         end else if (run) begin  // read a column
             if (j <= jend) k <= k + 1;
             j <= j == jmax ? 0 : j + 1;
             if (j == jmax) begin i <= i + 1; run <= i != imax; end
-        end else if (v2 && !v1)  // the last result is being stored
+        end else if (v[2 + deep] && !v[1 + deep])  // the last result is being stored
             op <= op == {len(ops) - 1} ? {first} : op + 1;
-        else if (!v1 && (op != {first} || start)) begin  // begin the operation
+        else if (v == 0 && (op != {first} || start)) begin  // begin the operation
             i <= 0; j <= 0; k <= base; o <= 0; run <= 1;
         end
     end
 
-    assign ready = op == {first} && !run && !v1 && !v2;
-    assign valid = v2 && op == {emit};
+    assign ready = op == {first} && !run && v == 0;
+    assign valid = v[2] && op == {emit};
     assign y = t2;
 endmodule
 '''
