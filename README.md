@@ -61,11 +61,13 @@ units, the range of the weights and how often the cell runs on each byte;
 
 ## Simulate
 
-The compiler builds a chip from lanes that work side by side, so more lanes
-make a faster and larger chip. Compile a model with 8 lanes, simulate it on
-the bytes of any file, and compare with the reference:
+The compiler builds a chip from lanes that work side by side: matrix lanes,
+which only multiply and add, and vector lanes, which do the rest. More lanes
+make a faster and larger chip. Compile a model with 32 matrix lanes and 4
+vector lanes, simulate it on the bytes of any file, and compare with the
+reference:
 
-    python compile.py model.pc out 8
+    python compile.py model.pc out 32 4
     cd out
     verilator --binary -Wno-WIDTH --top tb ../tb.v permacast.v \
         --Mdir obj -o sim
@@ -93,10 +95,10 @@ chip write, and checks every byte against the reference:
 
 ## Bench
 
-    python bench.py model.pc --lanes 1 8 32 --valid data/stories-valid.txt
+    python bench.py model.pc --lanes 1 32 128 --valid data/stories-valid.txt
 
-This scores the model on held-out text and times both baselines on it. For
-each number of lanes it checks the compiled circuit against the reference,
+This scores the model on held-out text and times both baselines on it. For each
+number of matrix lanes it checks the compiled circuit against the reference,
 counts its clock ticks per step, and builds it for a Lattice ECP5 to get its
 size and fastest clock.
 

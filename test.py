@@ -60,14 +60,14 @@ def cpu(text, data, seed):
                           check=True, capture_output=True).stdout.decode()
 
 
-def simulate(text, bench, data=(), lanes=1, **settings):
-    """What a testbench writes when it runs the model, compiled with a number of
-    lanes, in Verilator."""
+def simulate(text, bench, data=(), lanes=(1, 1), **settings):
+    """What a testbench writes when it runs the model, compiled with numbers of
+    lanes for matrix products and vectors, in Verilator."""
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, 'model.pc').write_text(text)
         Path(tmp, 'in').write_bytes(bytes(data))
         for command in (
-            [sys.executable, ROOT / 'compile.py', 'model.pc', '.', str(lanes)],
+            [sys.executable, ROOT / 'compile.py', 'model.pc', '.', *map(str, lanes)],
             ['verilator', '--binary', '-Wno-WIDTH', '-j', '0', '--top', bench[0][:-2],
              *(ROOT / f for f in bench), 'permacast.v', '--Mdir', 'obj', '-o', 'sim'],
             ['./obj/sim', '+in=in', '+out=out', *(f'+{k}={v}' for k, v in settings.items())],
@@ -103,7 +103,7 @@ def random_model(rng, out=None):
 # every output.
 rng = np.random.default_rng(0)
 models = [(EXAMPLE, [0, 1, 1], 1)] * 2 + [random_model(rng) for _ in range(10)]
-for (text, data, seed), lanes in zip(models, [1, 2, 1, 2, 4, 8] * 2):
+for (text, data, seed), lanes in zip(models, [(1, 1), (2, 1), (2, 2), (4, 1), (4, 4), (8, 2)] * 2):
     model = Model(text, seed)
     expected = ''.join(' '.join(map(str, model.step(x))) + '\n' for x in data)
     assert cpu(text, data, seed) == expected, text
@@ -111,7 +111,7 @@ for (text, data, seed), lanes in zip(models, [1, 2, 1, 2, 4, 8] * 2):
 
 # So must the chip, through its serial port: answering a host, and alone.
 CHIP = ['chip_tb.v', 'chip.v']
-for (text, data, seed), lanes in zip([random_model(rng, 'pick') for _ in range(3)], [1, 2, 4]):
+for (text, data, seed), lanes in zip([random_model(rng, 'pick') for _ in range(3)], [(1, 1), (2, 1), (4, 2)]):
     model = Model(text, seed)
     expected = ''.join(f'{model.step(x)[0]}\n' for x in data)
     assert simulate(text, CHIP, data, lanes, seed=seed) == expected, text

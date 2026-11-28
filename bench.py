@@ -1,12 +1,12 @@
 """Measure the chips the compiler makes, against the CPU and GPU baselines.
 
-python bench.py model.pc ... [--lanes 1 8 32] [--valid text]    writes BENCH.md
+python bench.py model.pc ... [--lanes 1 32 128] [--valid text]    writes BENCH.md
 
 Each model is scored on held-out text, if given, and compiled once for each
-number of lanes. A circuit is measured
+number of matrix lanes, with the compiler's vector lanes. A circuit is measured
 only if it matches the reference. Its clock ticks per step come from
-simulation, and its size and fastest clock from building it for a Lattice
-ECP5 with open tools, which anyone can repeat. The baselines must match the
+simulation, and its size and fastest clock from building it for a Lattice ECP5
+with open tools, which anyone can repeat. The baselines must match the
 reference too.
 
 It needs a C compiler, PyTorch with a GPU, Verilator, Yosys and nextpnr-ecp5.
@@ -28,7 +28,7 @@ import torch
 
 import gpu
 import train
-from compile import bits
+from compile import VECTOR, bits
 from ref import Model
 
 ROOT = Path(__file__).parent
@@ -88,13 +88,13 @@ def measure_model(path, valid):
             quality, *(f'{round(n):,}' for n in (max(speeds), alone, together))]
 
 
-def measure_chip(path, lanes):
-    """The speed and size of a model's chip."""
+def measure_chip(path, lanes, vector):
+    """The speed and size of a model's chip, with lanes for matrix products and vector lanes."""
     text = path.read_text()
     data = inputs(Model(text), 8)
     with tempfile.TemporaryDirectory() as tmp:
         Path(tmp, 'in').write_bytes(data)
-        run(sys.executable, ROOT / 'compile.py', path.resolve(), '.', str(lanes), cwd=tmp)
+        run(sys.executable, ROOT / 'compile.py', path.resolve(), '.', str(lanes), str(vector), cwd=tmp)
         run('verilator', '--binary', '-Wno-WIDTH', '-j', '0', '--top', 'tb', ROOT / 'tb.v',
             'permacast.v', '--Mdir', 'obj', '-o', 'sim', cwd=tmp)
         ticks = int(run('./obj/sim', '+in=in', '+out=out', cwd=tmp).split()[0])
@@ -105,15 +105,15 @@ def measure_chip(path, lanes):
                 '--lpf-allow-unconstrained', '--timing-allow-fail', '--report', 'report.json', cwd=tmp,
                 timeout=ROUTE)
         except subprocess.TimeoutExpired:
-            return [path.stem, lanes, f'{ticks:,}', f'does not route in {ROUTE // 60} minutes']
+            return [path.stem, lanes, vector, f'{ticks:,}', f'does not route in {ROUTE // 60} minutes']
         except subprocess.CalledProcessError as e:
             if 'no BELs remaining' not in e.stdout:
                 raise
-            return [path.stem, lanes, f'{ticks:,}', 'does not fit']
+            return [path.stem, lanes, vector, f'{ticks:,}', 'does not fit']
         report = json.loads(Path(tmp, 'report.json').read_text())
     (clock,) = (c['achieved'] for c in report['fmax'].values())
     cells = [report['utilization'][c]['used'] for c in ('TRELLIS_COMB', 'TRELLIS_FF', 'DP16KD', 'MULT18X18D')]
-    return [path.stem, lanes, f'{ticks:,}', f'{clock:.1f}', f'{round(clock * 1e6 / ticks):,}', *(f'{n:,}' for n in cells)]
+    return [path.stem, lanes, vector, f'{ticks:,}', f'{clock:.1f}', f'{round(clock * 1e6 / ticks):,}', *(f'{n:,}' for n in cells)]
 
 
 def table(columns, rows):
@@ -128,12 +128,12 @@ def paragraph(text, indent=''):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('models', nargs='+', type=Path)
-    parser.add_argument('--lanes', nargs='+', type=int, default=[1, 8, 32])
+    parser.add_argument('--lanes', nargs='+', type=int, default=[1, 32, 128], help='matrix lanes')
     parser.add_argument('--valid', type=Path, help='held-out text to score the models on')
     args = parser.parse_args()
     models = [measure_model(p, args.valid) for p in args.models]  # one at a time, since they are timed
     with ProcessPoolExecutor(BUILDS) as pool:
-        chips = list(pool.map(measure_chip, *zip(*[(p, lanes) for p in args.models for lanes in args.lanes])))
+        chips = list(pool.map(measure_chip, *zip(*[(p, n, min(n, VECTOR)) for p in args.models for n in args.lanes])))
     (ROOT / 'BENCH.md').write_text(
         '# Bench\n\n'
         + paragraph('What the compiler makes of each model, written by `python bench.py`. Every chip and '
@@ -156,5 +156,5 @@ if __name__ == '__main__':
         + paragraph('- **Clock, logic cells, flip-flops, block RAMs and multipliers** are for a Lattice '
                     f"ECP5-85F, built with Yosys {version('yosys', '-V')} and nextpnr "
                     f"{version('nextpnr-ecp5', '--version')} at seed 1.", '  ')
-        + '\n' + table(['Model', 'Lanes', 'Ticks per step', 'Clock, MHz', 'Steps per second', 'Logic cells',
+        + '\n' + table(['Model', 'Matrix lanes', 'Vector lanes', 'Ticks per step', 'Clock, MHz', 'Steps per second', 'Logic cells',
                         'Flip-flops', 'Block RAMs', 'Multipliers'], chips))
